@@ -112,6 +112,7 @@ defaults:
 #   seniority: [mid, senior]      # junior | mid | senior | staff_plus
 #   work_modes: [remote_global, remote_country, hybrid, onsite]
 #   prioritize_work_modes: [remote_global]  # among equal scores, apply to these first
+#   min_salary: 150000            # cap at 5 when the POSTED max is lower (unposted never caps)
 
 # Negative keywords -- jobs with these in the title get score 1 without an LLM
 # call (case-insensitive substring; add a trailing space to match a whole word)

@@ -41,12 +41,14 @@ SCORE: [1-10]
 WORK_MODE: [remote_global | remote_country | hybrid | onsite | unknown]
 LOCATION_MATCH: [yes | no | unknown]
 SENIORITY: [junior | mid | senior | staff_plus | unknown]
+SALARY_MAX: [top of the posted annual base salary range in USD as a plain number, or unknown]
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
 REASONING: [2-3 sentences explaining the score]
 
 WORK_MODE: remote_global = fully remote and open to working from other countries; remote_country = fully remote but limited to specific countries or regions; hybrid = some days in an office; onsite = in an office full time.
 LOCATION_MATCH: yes if the candidate can do this job from where they are based (remote: their country is in the allowed region; hybrid/onsite: within commuting distance of one of their preferred locations).
-SENIORITY: the level the posting is hiring for (junior = entry level or under 2 years; mid = about 2-5 years; senior = about 5+ years; staff_plus = staff, principal or above)."""
+SENIORITY: the level the posting is hiring for (junior = entry level or under 2 years; mid = about 2-5 years; senior = about 5+ years; staff_plus = staff, principal or above).
+SALARY_MAX: only from a salary actually stated in the posting (convert hourly x 2080); never estimate."""
 
 WORK_MODES = ("remote_global", "remote_country", "hybrid", "onsite")
 SENIORITY_LEVELS = ("junior", "mid", "senior", "staff_plus")
@@ -92,6 +94,9 @@ def apply_preferences(result: dict, prefs: dict | None) -> dict:
     if (allowed_levels and result.get("seniority") in SENIORITY_LEVELS
             and result["seniority"] not in allowed_levels):
         caps.append((4, f"{result['seniority']} level not targeted"))
+    min_salary = prefs.get("min_salary")
+    if min_salary and result.get("salary_max") and result["salary_max"] < int(min_salary):
+        caps.append((5, f"posted max ${result['salary_max']:,} below ${int(min_salary):,} target"))
 
     if caps:
         cap, reason = min(caps)
@@ -136,7 +141,25 @@ def _parse_score_response(response: str) -> dict:
                     value = line[len(tag):].strip().strip("[]").lower()
                     labels[key] = None if value in ("", "unknown") else value
 
-    return {"score": score, "keywords": keywords, "reasoning": reasoning, **labels}
+    return {"score": score, "keywords": keywords, "reasoning": reasoning, **labels,
+            "salary_max": _parse_salary(response)}
+
+
+def _parse_salary(response: str) -> int | None:
+    """Read the SALARY_MAX line as annual USD ("$185,000", "185k", "185000")."""
+    # [ \t] not \s: "145000\nKEYWORDS:" must not read the next line's K as "thousand".
+    m = re.search(r"SALARY_MAX:[ \t]*\$?[ \t]*([\d,.]+)[ \t]*(k\b)?", response.replace("**", ""),
+                  re.IGNORECASE)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None
+    if m.group(2):
+        value *= 1000
+    # Below 1000 is a parse slip (e.g. "185" meaning thousands is ambiguous): ignore.
+    return int(value) if value >= 1000 else None
 
 
 def score_job(resume_text: str, job: dict, prefs: dict | None = None) -> dict:
@@ -154,8 +177,9 @@ def score_job(resume_text: str, job: dict, prefs: dict | None = None) -> dict:
     job_text = (
         f"TITLE: {job['title']}\n"
         f"COMPANY: {job['site']}\n"
-        f"LOCATION: {job.get('location', 'N/A')}\n\n"
-        f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
+        f"LOCATION: {job.get('location', 'N/A')}\n"
+        + (f"SALARY (from the job board): {job['salary']}\n" if job.get("salary") else "")
+        + f"\nDESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )
 
     messages = [

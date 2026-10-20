@@ -106,3 +106,24 @@ def test_llm_failure_is_retried_next_run(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(scorer, "get_client", lambda task: Fake())
     job = {"title": "SWE", "site": "Acme", "full_description": "..."}
     assert scorer.score_job("resume", job, PREFS).get("error") is True
+
+
+@pytest.mark.parametrize(("line", "expected"), [
+    ("SALARY_MAX: 185000", 185000),
+    ("SALARY_MAX: $142,500", 142500),
+    ("**SALARY_MAX:** 150k", 150000),
+    ("SALARY_MAX: unknown", None),
+    ("SALARY_MAX: 185", None),  # ambiguous, ignored
+    ("SALARY_MAX: 145000\nKEYWORDS: Java", 145000),  # next line's K is not "thousand"
+])
+def test_salary_parsing(line: str, expected: int | None) -> None:
+    assert scorer._parse_score_response(f"SCORE: 8\n{line}")["salary_max"] == expected
+
+
+def test_low_posted_salary_is_capped_but_unknown_is_not() -> None:
+    prefs = {**PREFS, "min_salary": 160000}
+    base = {"score": 9, "reasoning": "x", "work_mode": "remote_global",
+            "location_match": "yes", "seniority": "mid"}
+    assert scorer.apply_preferences({**base, "salary_max": 140000}, prefs)["score"] == 5
+    assert scorer.apply_preferences({**base, "salary_max": 175000}, prefs)["score"] == 9
+    assert scorer.apply_preferences({**base, "salary_max": None}, prefs)["score"] == 9

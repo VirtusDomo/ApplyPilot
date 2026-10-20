@@ -19,7 +19,8 @@ Safety and honesty pass for auto-apply, plus correctness fixes. Claude as the LL
 - **Preference-aware scoring** - the scorer now also reports each job's work mode
   (remote_global / remote_country / hybrid / onsite), whether the candidate can work it from
   their base location, and its seniority. A new `preferences` section in searches.yaml caps the
-  score at 3 for unworkable locations or unwanted work modes, and at 4 for untargeted levels.
+  score at 3 for unworkable locations or unwanted work modes, at 4 for untargeted levels, and
+  at 5 when the posted salary tops out below `min_salary`.
   Work mode is stored in a new `work_mode` column; `prioritize_work_modes` breaks score ties
   when picking the next job to apply to (jobs scored earlier need `run score --rescore` for this).
 - **Usage log** - every Claude call and apply session is recorded in `logs/llm_usage.jsonl`;
