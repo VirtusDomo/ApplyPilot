@@ -106,3 +106,21 @@ def test_equal_scores_apply_to_preferred_work_mode_first(
                         lambda: {"preferences": {"prioritize_work_modes": priority}})
 
     assert launcher.acquire_job(min_score=7)["url"] == expected
+
+
+def test_equal_scores_prefer_listed_locations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from applypilot import config, database
+
+    conn = database.init_db(tmp_path / "jobs.db")
+    for url, loc in (("https://jobs.example.com/a", "Austin, TX"),
+                     ("https://jobs.example.com/b", "New York, NY")):
+        conn.execute(
+            "INSERT INTO jobs (url, title, site, location, fit_score, work_mode, tailored_resume_path) "
+            "VALUES (?, 'SWE', 'Example', ?, 8, 'onsite', 'r.txt')", (url, loc))
+    conn.commit()
+    monkeypatch.setattr(launcher, "get_connection", lambda: conn)
+    monkeypatch.setattr(launcher, "_load_blocked", lambda: ([], []))
+    monkeypatch.setattr(config, "load_search_config", lambda: {"preferences": {
+        "prioritize_work_modes": ["remote_global"], "prioritize_locations": ["New York"]}})
+
+    assert launcher.acquire_job(min_score=7)["url"] == "https://jobs.example.com/b"

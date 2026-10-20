@@ -127,3 +127,18 @@ def test_low_posted_salary_is_capped_but_unknown_is_not() -> None:
     assert scorer.apply_preferences({**base, "salary_max": 140000}, prefs)["score"] == 5
     assert scorer.apply_preferences({**base, "salary_max": 175000}, prefs)["score"] == 9
     assert scorer.apply_preferences({**base, "salary_max": None}, prefs)["score"] == 9
+
+
+def test_contract_and_off_target_roles_are_capped() -> None:
+    prefs = {**PREFS, "employment_types": ["full_time"], "role_types": ["backend", "full_stack"]}
+    base = {"score": 9, "reasoning": "x", "work_mode": "remote_global", "location_match": "yes",
+            "seniority": "mid", "employment": "full_time", "role": "backend"}
+    assert scorer.apply_preferences({**base}, prefs)["score"] == 9
+    assert scorer.apply_preferences({**base, "employment": "contract"}, prefs)["score"] == 2
+    assert scorer.apply_preferences({**base, "role": "qa_test"}, prefs)["score"] == 4
+    assert scorer.apply_preferences({**base, "role": None, "employment": None}, prefs)["score"] == 9
+
+
+def test_employment_and_role_are_parsed() -> None:
+    r = scorer._parse_score_response("SCORE: 7\nEMPLOYMENT: contract\nROLE: full_stack")
+    assert (r["employment"], r["role"]) == ("contract", "full_stack")

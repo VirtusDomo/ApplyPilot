@@ -160,19 +160,34 @@ def parse_result(output: str, dry_run: bool = False) -> str:
 # Database operations
 # ---------------------------------------------------------------------------
 
-def _work_mode_priority() -> list[str]:
-    """``preferences.prioritize_work_modes`` from searches.yaml, as a list of strings."""
+def _apply_priorities() -> tuple[list[str], list[str]]:
+    """``preferences.prioritize_work_modes`` and ``prioritize_locations`` from searches.yaml."""
     import yaml
 
     try:
         prefs = (config.load_search_config() or {}).get("preferences") or {}
     except (OSError, yaml.YAMLError, AttributeError) as e:  # a broken searches.yaml must not stop applying
-        logger.warning("Ignoring prioritize_work_modes: cannot read searches.yaml (%s)", e)
-        return []
-    modes = prefs.get("prioritize_work_modes") or []
-    if isinstance(modes, str):
-        modes = [modes]
-    return [str(m) for m in modes]
+        logger.warning("Ignoring apply priorities: cannot read searches.yaml (%s)", e)
+        return [], []
+
+    def as_list(value) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        return [str(v) for v in value or []]
+
+    return as_list(prefs.get("prioritize_work_modes")), as_list(prefs.get("prioritize_locations"))
+
+
+def _priority_order_sql(modes: list[str], locations: list[str]) -> tuple[str, list[str]]:
+    """ORDER BY terms (with params) that rank preferred work modes, then locations, first."""
+    sql = ""
+    if modes:
+        whens = "".join(f"WHEN ? THEN {i} " for i in range(len(modes)))
+        sql += f"CASE work_mode {whens}ELSE {len(modes)} END, "
+    if locations:
+        whens = "".join(f"WHEN location LIKE ? THEN {i} " for i in range(len(locations)))
+        sql += f"CASE {whens}ELSE {len(locations)} END, "
+    return sql, modes + [f"%{loc}%" for loc in locations]
 
 
 def acquire_job(target_url: str | None = None, min_score: int = 7,
@@ -188,7 +203,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
     Returns:
         Job dict or None if the queue is empty.
     """
-    priority = _work_mode_priority()
+    priority_sql, priority_params = _priority_order_sql(*_apply_priorities())
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -218,10 +233,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             if blocked_patterns:
                 url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
-            # Among equal scores, apply to preferred work modes first.
-            mode_order = "".join(f"WHEN ? THEN {i} " for i in range(len(priority)))
-            mode_order = f"CASE work_mode {mode_order}ELSE {len(priority)} END, " if priority else ""
-            params.extend(priority)
+            # Among equal scores, apply to preferred work modes, then locations, first.
+            params.extend(priority_params)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
@@ -232,7 +245,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
-                ORDER BY fit_score DESC, {mode_order}url
+                ORDER BY fit_score DESC, {priority_sql}url
                 LIMIT 1
             """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
 

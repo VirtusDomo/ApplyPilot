@@ -42,16 +42,23 @@ WORK_MODE: [remote_global | remote_country | hybrid | onsite | unknown]
 LOCATION_MATCH: [yes | no | unknown]
 SENIORITY: [junior | mid | senior | staff_plus | unknown]
 SALARY_MAX: [top of the posted annual base salary range in USD as a plain number, or unknown]
+EMPLOYMENT: [full_time | contract | part_time | internship | unknown]
+ROLE: [backend | full_stack | frontend | mobile | platform_infra | data | ml_ai | qa_test | other]
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
 REASONING: [2-3 sentences explaining the score]
 
 WORK_MODE: remote_global = fully remote and open to working from other countries; remote_country = fully remote but limited to specific countries or regions; hybrid = some days in an office; onsite = in an office full time. If the posting names an office location and never mentions remote or hybrid work, use onsite.
 LOCATION_MATCH: yes if the candidate can do this job from where they are based (remote: their country is in the allowed region; hybrid/onsite: within commuting distance of one of their preferred locations).
 SENIORITY: the level the posting is hiring for (junior = entry level or under 2 years; mid = about 2-5 years; senior = about 5+ years; staff_plus = staff, principal or above).
-SALARY_MAX: only from a salary actually stated in the posting (convert hourly x 2080); never estimate."""
+SALARY_MAX: only from a salary actually stated in the posting (convert hourly x 2080); never estimate.
+EMPLOYMENT: contract includes contract-to-hire, temporary, freelance, 1099, C2C/corp-to-corp and staffing-agency placements; full_time = a permanent employee (W-2) role. Hourly pay alone does not make a role contract.
+ROLE: the main kind of engineering the role does day to day (platform_infra = DevOps, SRE, cloud/infrastructure; qa_test = QA, SDET, test automation; ml_ai = building ML models or AI research)."""
 
 WORK_MODES = ("remote_global", "remote_country", "hybrid", "onsite")
 SENIORITY_LEVELS = ("junior", "mid", "senior", "staff_plus")
+EMPLOYMENT_TYPES = ("full_time", "contract", "part_time", "internship")
+ROLE_TYPES = ("backend", "full_stack", "frontend", "mobile", "platform_infra", "data", "ml_ai",
+              "qa_test", "other")
 
 
 def build_score_prompt(prefs: dict | None = None) -> str:
@@ -77,13 +84,21 @@ def title_excluded(title: str, patterns: list[str]) -> str | None:
 
 
 def apply_preferences(result: dict, prefs: dict | None) -> dict:
-    """Cap the fit score when the job is the wrong level or in a place the candidate can't work.
+    """Cap the fit score when the job doesn't match the candidate's preferences.
 
-    The LLM reports facts (work mode, location match, seniority); the caps are
-    applied here so they are predictable. Unknown values never cap.
+    The LLM reports facts (work mode, location match, seniority, salary,
+    employment type, role type); the caps are applied here so they are
+    predictable. Unknown values never cap.
     """
     prefs = prefs or {}
     caps: list[tuple[int, str]] = []
+    allowed_employment = prefs.get("employment_types")
+    if (allowed_employment and result.get("employment") in EMPLOYMENT_TYPES
+            and result["employment"] not in allowed_employment):
+        caps.append((2, f"{result['employment']} not wanted"))
+    allowed_roles = prefs.get("role_types")
+    if allowed_roles and result.get("role") in ROLE_TYPES and result["role"] not in allowed_roles:
+        caps.append((4, f"{result['role']} role not targeted"))
     # Without a base location the model has nothing to judge location against.
     if prefs.get("base_location") and result.get("location_match") == "no":
         caps.append((3, "location not workable"))
@@ -114,12 +129,14 @@ def _parse_score_response(response: str) -> dict:
 
     Returns:
         {"score": int, "keywords": str, "reasoning": str,
-         "work_mode": str|None, "location_match": str|None, "seniority": str|None}
+         "work_mode", "location_match", "seniority", "employment", "role": str|None,
+         "salary_max": int|None}
     """
     score = 0
     keywords = ""
     reasoning = response
-    labels: dict[str, str | None] = {"work_mode": None, "location_match": None, "seniority": None}
+    labels: dict[str, str | None] = {"work_mode": None, "location_match": None, "seniority": None,
+                                     "employment": None, "role": None}
 
     for line in response.split("\n"):
         # Tolerate markdown decoration such as "**SCORE:** 7" or "- SCORE: 7".

@@ -20,7 +20,9 @@ Safety and honesty pass for auto-apply, plus correctness fixes. Claude as the LL
   (remote_global / remote_country / hybrid / onsite), whether the candidate can work it from
   their base location, and its seniority. A new `preferences` section in searches.yaml caps the
   score at 3 for unworkable locations or unwanted work modes, at 4 for untargeted levels, and
-  at 5 when the posted salary tops out below `min_salary`.
+  at 5 when the posted salary tops out below `min_salary`. `employment_types` caps other
+  employment (e.g. contract) at 2 and `role_types` caps other kinds of roles at 4;
+  `prioritize_locations` breaks remaining score ties when picking the next job to apply to.
   Work mode is stored in a new `work_mode` column; `prioritize_work_modes` breaks score ties
   when picking the next job to apply to (jobs scored earlier need `run score --rescore` for this).
 - **Low reasoning effort for bulk tasks** - scoring and extraction run with `--effort low`

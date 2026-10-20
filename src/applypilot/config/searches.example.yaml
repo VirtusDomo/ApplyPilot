@@ -113,6 +113,10 @@ defaults:
 #   work_modes: [remote_global, remote_country, hybrid, onsite]
 #   prioritize_work_modes: [remote_global]  # among equal scores, apply to these first
 #   min_salary: 150000            # cap at 5 when the POSTED max is lower (unposted never caps)
+#   employment_types: [full_time] # full_time | contract | part_time | internship (others capped at 2)
+#   role_types: [backend, full_stack]  # backend | full_stack | frontend | mobile | platform_infra |
+#                                      # data | ml_ai | qa_test | other (others capped at 4)
+#   prioritize_locations: ["New York"]  # among equal scores, apply to these places first
 
 # Negative keywords -- jobs with these in the title get score 1 without an LLM
 # call (case-insensitive substring; add a trailing space to match a whole word)
