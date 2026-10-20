@@ -74,15 +74,13 @@ def get_chrome_path() -> str:
     )
 
 
-def get_chrome_user_data() -> Path:
-    """Default Chrome user data directory, cross-platform."""
-    system = platform.system()
-    if system == "Windows":
-        return Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data"
-    elif system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "Google" / "Chrome"
-    else:
-        return Path.home() / ".config" / "google-chrome"
+def get_claude_path() -> str | None:
+    """Resolve the Claude Code CLI executable.
+
+    On Windows the CLI is installed as ``claude.cmd``, which ``subprocess``
+    cannot launch by bare name, so always spawn the resolved path.
+    """
+    return shutil.which("claude")
 
 
 def ensure_dirs():
@@ -111,6 +109,23 @@ def load_search_config() -> dict:
             return yaml.safe_load(example.read_text(encoding="utf-8"))
         return {}
     return yaml.safe_load(SEARCH_CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def load_location_filter(search_cfg: dict | None = None) -> tuple[list[str], list[str]]:
+    """Return (accept_patterns, reject_patterns) for job location filtering.
+
+    Reads the documented nested form (``location.accept_patterns`` /
+    ``location.reject_patterns``) and the legacy top-level keys
+    (``location_accept`` / ``location_reject_non_remote``), merging both.
+    """
+    if search_cfg is None:
+        search_cfg = load_search_config()
+    nested = search_cfg.get("location") or {}
+    if not isinstance(nested, dict):
+        nested = {}
+    accept = list(nested.get("accept_patterns") or []) + list(search_cfg.get("location_accept") or [])
+    reject = list(nested.get("reject_patterns") or []) + list(search_cfg.get("location_reject_non_remote") or [])
+    return accept, reject
 
 
 def load_sites_config() -> dict:
@@ -166,9 +181,21 @@ DEFAULTS = {
     "max_apply_attempts": 3,
     "max_tailor_attempts": 5,
     "poll_interval": 60,
-    "apply_timeout": 300,
+    "apply_timeout": 600,
     "viewport": "1280x900",
+    # MCP servers are pinned: an unpinned @latest is fetched from npm on every
+    # apply run, so a compromised release would get browser + mailbox access.
+    "playwright_mcp_package": "@playwright/mcp@0.0.83",
+    "gmail_mcp_package": "@gongrzhe/server-gmail-autoauth-mcp@1.1.11",
 }
+
+
+def gmail_enabled() -> bool:
+    """Whether the apply agent may read Gmail (opt-in via APPLYPILOT_ENABLE_GMAIL=1).
+
+    Used only to read verification codes; the agent can never send or modify mail.
+    """
+    return os.environ.get("APPLYPILOT_ENABLE_GMAIL", "").strip().lower() in ("1", "true", "yes")
 
 
 def load_env():
@@ -210,7 +237,7 @@ def get_tier() -> int:
     if not has_llm:
         return 1
 
-    has_claude = shutil.which("claude") is not None
+    has_claude = get_claude_path() is not None
     try:
         get_chrome_path()
         has_chrome = True

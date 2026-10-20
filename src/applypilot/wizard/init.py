@@ -26,6 +26,7 @@ from applypilot.config import (
     RESUME_PDF_PATH,
     SEARCH_CONFIG_PATH,
     ensure_dirs,
+    get_claude_path,
 )
 
 console = Console()
@@ -101,7 +102,6 @@ def _setup_profile() -> dict:
         "github_url": Prompt.ask("GitHub URL (optional)", default=""),
         "portfolio_url": Prompt.ask("Portfolio URL (optional)", default=""),
         "website_url": Prompt.ask("Personal website URL (optional)", default=""),
-        "password": Prompt.ask("Job site password (used for login walls during auto-apply)", password=True, default=""),
     }
 
     # -- Work Authorization --
@@ -159,6 +159,21 @@ def _setup_profile() -> dict:
         "preserved_projects": [s.strip() for s in projects.split(",") if s.strip()],
         "preserved_school": school.strip(),
         "real_metrics": [s.strip() for s in metrics.split(",") if s.strip()],
+    }
+
+    # -- Screening facts (answered on applications on your behalf) --
+    console.print("\n[bold cyan]Screening Questions[/bold cyan]")
+    console.print("[dim]Applications ask these as legal attestations. Auto-apply only ever uses your answers here; "
+                  "leave one blank and it will stop and ask you instead of guessing.[/dim]")
+    yes_no = ["Yes", "No", ""]
+    profile["screening"] = {
+        "age_18_or_older": Prompt.ask("Are you 18 or older?", choices=yes_no, default=""),
+        "background_check_consent": Prompt.ask("Do you consent to a background check?", choices=yes_no, default=""),
+        "criminal_convictions": Prompt.ask("Do you have criminal convictions you must disclose?",
+                                           choices=yes_no, default=""),
+        "previously_worked_here": "No",
+        "willing_to_relocate": Prompt.ask("Willing to relocate?", choices=yes_no, default=""),
+        "how_heard": "Online Job Board",
     }
 
     # -- EEO Voluntary (defaults) --
@@ -292,7 +307,7 @@ def _setup_auto_apply() -> None:
         return
 
     # Check for Claude Code CLI
-    if shutil.which("claude"):
+    if get_claude_path():
         console.print("[green]Claude Code CLI detected.[/green]")
     else:
         console.print(
@@ -301,23 +316,17 @@ def _setup_auto_apply() -> None:
             "Auto-apply won't work until Claude Code is installed."
         )
 
-    # Optional: CapSolver for CAPTCHAs
-    console.print("\n[dim]Some job sites use CAPTCHAs. CapSolver can handle them automatically.[/dim]")
-    if Confirm.ask("Configure CapSolver API key? (optional)", default=False):
-        capsolver_key = Prompt.ask("CapSolver API key")
-        # Append to existing .env or create
-        if ENV_PATH.exists():
-            existing = ENV_PATH.read_text(encoding="utf-8")
-            if "CAPSOLVER_API_KEY" not in existing:
-                ENV_PATH.write_text(
-                    existing.rstrip() + f"\nCAPSOLVER_API_KEY={capsolver_key}\n",
-                    encoding="utf-8",
-                )
-        else:
-            ENV_PATH.write_text(f"# ApplyPilot configuration\nCAPSOLVER_API_KEY={capsolver_key}\n", encoding="utf-8")
-        console.print("[green]CapSolver key saved.[/green]")
-    else:
-        console.print("[dim]Skipped. Add CAPSOLVER_API_KEY to .env later if needed.[/dim]")
+    console.print(
+        "\n[dim]Auto-apply uses its own browser profile, never your everyday Chrome. It never types "
+        "passwords or creates accounts: sign in to job sites once by hand in the worker browser and "
+        "the session is reused. Jobs blocked by CAPTCHAs, logins, or unanswered questions are queued "
+        "for you to finish by hand.[/dim]"
+    )
+    if Confirm.ask("Let auto-apply read Gmail for verification codes? (read-only, optional)", default=False):
+        existing = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else "# ApplyPilot configuration\n"
+        if "APPLYPILOT_ENABLE_GMAIL" not in existing:
+            ENV_PATH.write_text(existing.rstrip() + "\nAPPLYPILOT_ENABLE_GMAIL=1\n", encoding="utf-8")
+        console.print("[green]Gmail verification-code reading enabled.[/green]")
 
 
 # ---------------------------------------------------------------------------

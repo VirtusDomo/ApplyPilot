@@ -1,0 +1,67 @@
+"""Tests that the apply prompt never fabricates answers or carries secrets."""
+
+from pathlib import Path
+
+import pytest
+
+from applypilot import config
+from applypilot.apply import prompt
+
+PROFILE = {
+    "personal": {"full_name": "Sam Lee", "email": "sam@example.com", "phone": "555-0100",
+                 "city": "Austin", "country": "USA", "password": "hunter2"},
+    "work_authorization": {"legally_authorized_to_work": "Yes", "require_sponsorship": "No"},
+    "compensation": {"salary_expectation": "90000"},
+    "skills_boundary": {"languages": ["Python"]},
+    "screening": {"age_18_or_older": "Yes"},
+}
+
+
+@pytest.fixture
+def build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    resume = tmp_path / "resume.txt"
+    resume.with_suffix(".pdf").write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(config, "load_profile", lambda: PROFILE)
+    monkeypatch.setattr(config, "load_search_config", dict)
+    monkeypatch.setattr(config, "APPLY_WORKER_DIR", tmp_path / "workers")
+    monkeypatch.setenv("CAPSOLVER_API_KEY", "secret-capsolver-key")
+    monkeypatch.delenv("APPLYPILOT_ENABLE_GMAIL", raising=False)
+    job = {"url": "https://jobs.example.com/1", "title": "Engineer", "site": "Example",
+           "tailored_resume_path": str(resume)}
+
+    def _build(dry_run: bool = False) -> str:
+        return prompt.build_prompt(job=job, tailored_resume="resume text", dry_run=dry_run)
+
+    return _build
+
+
+def test_no_hardcoded_attestations(build) -> None:
+    text = build()
+    assert "Felony: No" not in text
+    assert "Background Check: Yes" not in text
+    assert "Age 18+: Yes" in text  # stated in the profile
+    assert "Criminal Convictions: NOT PROVIDED" in text
+    assert "RESULT:NEEDS_HUMAN" in text
+
+
+def test_no_secrets_or_captcha_solving(build) -> None:
+    text = build()
+    assert "hunter2" not in text
+    assert "secret-capsolver-key" not in text
+    assert "capsolver" not in text.lower()
+    assert "Try sign up" not in text
+
+
+def test_no_skill_inflation_rule(build) -> None:
+    assert "answer YES" not in build()
+
+
+def test_dry_run_never_reports_applied(build) -> None:
+    text = build(dry_run=True)
+    assert "RESULT:DRY_RUN" in text
+    assert "then output RESULT:APPLIED" not in text
+    assert "Do NOT create accounts" in text
+
+
+def test_email_verification_needs_human_without_gmail(build) -> None:
+    assert "RESULT:NEEDS_HUMAN:email_verification" in build()

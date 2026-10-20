@@ -81,7 +81,7 @@ Take the base resume and job description. Return a tailored resume as a JSON obj
 ## SKILLS BOUNDARY (real skills only):
 {skills_block}
 
-You MAY add 2-3 closely related tools (Kubernetes if Docker, Terraform if AWS, Redis if PostgreSQL). No unrelated languages/frameworks.
+Use ONLY skills from this list or the original resume. Never add a tool, language, framework or certification the candidate has not listed, even a closely related one.
 
 ## TAILORING RULES:
 
@@ -163,14 +163,11 @@ ISSUES: (list any problems, or "none")
 - Reordering anything
 - Changing the title or summary completely
 
-## TOLERANCE RULE:
-The goal is to get interviews, not to be a perfect fact-checker. Allow up to 3 minor stretches per resume:
-- Adding a closely related tool the candidate could realistically know is a MINOR STRETCH, not fabrication.
-- Reframing a metric with slightly different wording is a MINOR STRETCH.
-- Adding any LEARNABLE skill given their existing stack is a MINOR STRETCH.
-- Only FAIL if there are MAJOR lies: completely invented projects, fake companies, fake degrees, wildly inflated numbers, or skills from a completely different domain.
-
-Be strict about major lies. Be lenient about minor stretches and learnable skills. Do not fail for style, tone, or restructuring."""
+## STRICTNESS:
+This resume will be submitted to employers under the candidate's name, so any claim it makes must be true.
+- FAIL for any skill, tool, certification, metric or achievement that is not in the original resume or the allowed skills list -- however "closely related" or "learnable" it seems.
+- Rewording a metric is fine only if the number and its meaning are unchanged.
+- Do not fail for style, tone, or restructuring."""
 
 
 # ── JSON Extraction ───────────────────────────────────────────────────────
@@ -410,7 +407,8 @@ def tailor_resume(
             continue
 
         # Layer 1: Validate JSON fields
-        validation = validate_json_fields(data, profile, mode=validation_mode)
+        validation = validate_json_fields(data, profile, mode=validation_mode,
+                                          original_text=resume_text)
         report["validator"] = validation
 
         if not validation["passed"]:
@@ -438,11 +436,10 @@ def tailor_resume(
         if not judge["passed"]:
             avoid_notes.append(f"Judge rejected: {judge['issues']}")
             if attempt < max_retries:
-                # In normal mode, only retry on judge failure if there are retries left
-                if validation_mode != "lenient":
-                    continue
-            # Accept best attempt on last retry (all modes) or if lenient
-            report["status"] = "approved_with_judge_warning"
+                continue
+            # Out of retries: a resume the judge flagged for fabrication is never
+            # used for an application. The job is retried on a later run.
+            report["status"] = "failed_judge"
             return tailored, report
 
         # Both passed

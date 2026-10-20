@@ -100,9 +100,11 @@ def _kill_on_port(port: int) -> None:
 def setup_worker_profile(worker_id: int) -> Path:
     """Create an isolated Chrome profile for a worker.
 
-    On first run, clones from an existing worker profile (preferred, since
-    it already has session cookies) or from the user's real Chrome profile.
-    Subsequent runs reuse the existing worker profile.
+    The user's real Chrome profile is never copied: it holds live sessions
+    (email, banking, social) that an agent browsing untrusted job pages must
+    not be able to reach. Worker profiles start empty; any job-site logins the
+    user performs inside a worker profile are reused, and a new worker clones
+    an existing worker profile so those logins carry over.
 
     Args:
         worker_id: Numeric worker identifier.
@@ -114,7 +116,8 @@ def setup_worker_profile(worker_id: int) -> Path:
     if (profile_dir / "Default").exists():
         return profile_dir  # Already initialized
 
-    # Find a source: prefer existing worker (has session cookies), else user profile
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
     source: Path | None = None
     for wid in range(10):
         if wid == worker_id:
@@ -124,11 +127,11 @@ def setup_worker_profile(worker_id: int) -> Path:
             source = candidate
             break
     if source is None:
-        source = config.get_chrome_user_data()
+        logger.info("[worker-%d] Starting with a fresh, empty Chrome profile", worker_id)
+        return profile_dir
 
-    logger.info("[worker-%d] Copying Chrome profile from %s (first time setup)...",
+    logger.info("[worker-%d] Copying worker profile from %s (first time setup)...",
                 worker_id, source.name)
-    profile_dir.mkdir(parents=True, exist_ok=True)
 
     # Copy essential profile dirs -- skip caches and heavy transient data
     skip = {
@@ -275,13 +278,12 @@ def kill_all_chrome() -> None:
         procs = dict(_chrome_procs)
         _chrome_procs.clear()
 
+    # Only ports of workers this process launched -- never sweep a port blindly,
+    # it may belong to the user's own Chrome or another tool.
     for wid, proc in procs.items():
         if proc.poll() is None:
             _kill_process_tree(proc.pid)
         _kill_on_port(BASE_CDP_PORT + wid)
-
-    # Sweep base port in case of zombies
-    _kill_on_port(BASE_CDP_PORT)
 
 
 def reset_worker_dir(worker_id: int) -> Path:
@@ -316,6 +318,3 @@ def cleanup_on_exit() -> None:
         if proc.poll() is None:
             _kill_process_tree(proc.pid)
         _kill_on_port(BASE_CDP_PORT + wid)
-
-    # Sweep base port for any orphan
-    _kill_on_port(BASE_CDP_PORT)

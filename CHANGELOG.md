@@ -5,6 +5,53 @@ All notable changes to ApplyPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Safety and honesty pass for auto-apply, plus correctness fixes.
+
+### Security
+- **Apply agent is locked down** - runs with `--permission-mode dontAsk`, `--strict-mcp-config`,
+  only Playwright browser tools allowed, all built-in tools (shell, file read/write, web fetch)
+  denied. Previously `bypassPermissions` while browsing untrusted pages.
+- **Real Chrome profile is never copied** - worker browsers start from an empty profile instead
+  of cloning the user's everyday Chrome (with all its logged-in sessions).
+- **Gmail is opt-in and read-only** - `APPLYPILOT_ENABLE_GMAIL=1`; only `search_emails` and
+  `read_email` are allowed, for verification codes. Email applications go to the manual queue.
+- **No passwords** - the plain-text `personal.password` field and the "sign in / sign up with
+  this password" flow are removed. Sign in once by hand in the worker browser; sessions persist.
+- **MCP packages pinned** - `@playwright/mcp@0.0.83`, `@gongrzhe/server-gmail-autoauth-mcp@1.1.11`
+  instead of `@latest` fetched on every run.
+- **Prompt-injection guard** - the agent is told page content is data, and to stop with
+  `RESULT:FAILED:suspicious_page` if a page tries to redirect it.
+
+### Changed
+- **No CAPTCHA solving** - CapSolver integration removed. CAPTCHA jobs go to the manual queue.
+- **No fabricated answers** - removed hardcoded "Felony: No / Background Check: Yes / Age 18+: Yes"
+  and the "answer YES to any same-domain tool" rule. Screening facts come from the new
+  `profile.screening` section; a missing required fact stops the agent with
+  `RESULT:NEEDS_HUMAN:<question>`, stored as `apply_status='manual'`.
+- **Tailoring may not add skills** - removed "add 2-3 related tools" and the judge's
+  "3 minor stretches" tolerance. A resume the judge rejects on its last retry is now
+  `failed_judge` and is never used (previously `approved_with_judge_warning`).
+- Removed the hardcoded "$110K minimum for senior titles" salary rule.
+- `apply_timeout` default raised to 600s, now actually enforced.
+
+### Fixed
+- **Dry runs were recorded as applied** (#104) - new `RESULT:DRY_RUN` / `apply_status='dry_run'`;
+  dry runs also may not create accounts or confirm emails.
+- **Windows apply always failed** (#93) - the `claude` CLI is resolved with `shutil.which`
+  (`claude.cmd`).
+- **`--url` skipped never-attempted jobs** (#93) - NULL-safe `apply_status` check.
+- **Location filter ignored the documented config** (#109) - `location.accept_patterns` /
+  `reject_patterns` are now read (legacy top-level keys still work).
+- **JobSpy ignored `boards`** (#108) - falls back to legacy `sites`.
+- **Apply timeout never fired** - the 300s wait only started after the agent exited; a
+  watchdog now kills the session.
+- **Result parsing** - only the agent's last `RESULT:` line counts, so a code mentioned while
+  reasoning can't mark a job applied.
+- **Fabrication watchlist** - skills in the user's own profile or resume (e.g. C#, Rust, a real
+  certification) are no longer flagged as fabricated.
+
 ## [0.2.0] - 2026-02-17
 
 ### Added

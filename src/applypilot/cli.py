@@ -338,7 +338,7 @@ def doctor() -> None:
     import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path, get_claude_path, gmail_enabled,
     )
 
     load_env()
@@ -397,7 +397,7 @@ def doctor() -> None:
 
     # --- Tier 3 checks ---
     # Claude Code CLI
-    claude_bin = shutil.which("claude")
+    claude_bin = get_claude_path()
     if claude_bin:
         results.append(("Claude Code CLI", ok_mark, claude_bin))
     else:
@@ -420,13 +420,23 @@ def doctor() -> None:
         results.append(("Node.js (npx)", fail_mark,
                         "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
 
-    # CapSolver (optional)
-    capsolver = os.environ.get("CAPSOLVER_API_KEY")
-    if capsolver:
-        results.append(("CapSolver API key", ok_mark, "CAPTCHA solving enabled"))
-    else:
-        results.append(("CapSolver API key", "[dim]optional[/dim]",
-                        "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))
+    # Gmail (optional, read-only verification codes)
+    results.append(("Gmail (verification codes)", "[dim]optional[/dim]",
+                    "enabled, read-only" if gmail_enabled()
+                    else "off -- set APPLYPILOT_ENABLE_GMAIL=1 in .env to enable"))
+
+    # Settings from older versions that are no longer used
+    if os.environ.get("CAPSOLVER_API_KEY"):
+        results.append(("CAPSOLVER_API_KEY", "[yellow]unused[/yellow]",
+                        "CAPTCHA solving was removed; delete this key from .env"))
+    if PROFILE_PATH.exists():
+        import json
+        try:
+            if json.loads(PROFILE_PATH.read_text(encoding="utf-8")).get("personal", {}).get("password"):
+                results.append(("profile.json password", "[yellow]remove[/yellow]",
+                                "Stored in plain text and no longer used; delete personal.password"))
+        except json.JSONDecodeError:
+            pass
 
     # --- Render results ---
     console.print()

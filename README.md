@@ -100,7 +100,14 @@ Each stage is independent. Run them all or pick what you need.
 
 | Component | What It Does |
 |-----------|-------------|
-| CapSolver API key | Solves CAPTCHAs during auto-apply (hCaptcha, reCAPTCHA, Turnstile, FunCaptcha). Without it, CAPTCHA-blocked applications just fail gracefully |
+| `APPLYPILOT_ENABLE_GMAIL=1` | Lets the apply agent read (never send) Gmail to fetch email verification codes |
+
+### Auto-apply safety model (this fork)
+
+- The apply agent can only drive its own browser. Shell, file and web-fetch tools are denied.
+- Worker browsers use their own profile, never your everyday Chrome. Sign in to job sites once by hand in the worker browser; sessions are reused.
+- It never types passwords, creates accounts, sends email, or solves CAPTCHAs.
+- Every screening answer comes from your `profile.json`. If a required fact is missing, the job is queued as `manual` with the question, instead of guessed.
 
 > **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.
 
@@ -117,7 +124,7 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional).
+API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `APPLYPILOT_ENABLE_GMAIL` (optional).
 
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)
@@ -144,7 +151,7 @@ Generates a custom resume per job: reorders experience, emphasizes relevant skil
 Writes a targeted cover letter per job referencing the specific company, role, and how your experience maps to their requirements.
 
 ### Auto-Apply
-Claude Code launches a Chrome instance, navigates to each application page, detects the form type, fills personal information and work history, uploads the tailored resume and cover letter, answers screening questions with AI, and submits. A live dashboard shows progress in real-time.
+Claude Code launches a Chrome instance, navigates to each application page, detects the form type, fills personal information and work history, uploads the tailored resume and cover letter, answers screening questions from your profile, and submits. Anything it can't do honestly (CAPTCHA, login wall, unanswered question, email-only application) is queued as `manual` for you. A live dashboard shows progress in real-time.
 
 The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
 

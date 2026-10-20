@@ -56,8 +56,9 @@ LLM_LEAK_PHRASES: list[str] = [
     "the following cover letter", "the letter below",
 ]
 
-# Known fabrication markers: completely unrelated tools/languages.
-# Reasonable stretches (K8s, Terraform, Redis, Kafka etc.) are ALLOWED.
+# Common tools/credentials that tailoring must not invent. Each entry is only
+# flagged when it is NOT among the candidate's own skills or original resume
+# (see _fabricated_terms), so a real C# developer or certified engineer is fine.
 FABRICATION_WATCHLIST: set[str] = {
     # Languages with zero relation to the candidate's stack
     "c#", "c++", "golang", "rust", "ruby",
@@ -85,6 +86,20 @@ def _build_skills_set(profile: dict) -> set[str]:
     return allowed
 
 
+def _fabricated_terms(text: str, profile: dict, original_text: str = "") -> list[str]:
+    """Watchlist terms present in ``text`` that the candidate never claimed.
+
+    A term is legitimate when it appears in the profile's skills_boundary or
+    anywhere in the original resume.
+    """
+    text_lower = text.lower()
+    allowed_text = " ".join(_build_skills_set(profile)) + " " + original_text.lower()
+    return sorted(
+        term for term in FABRICATION_WATCHLIST
+        if len(term) > 2 and term in text_lower and term not in allowed_text
+    )
+
+
 def sanitize_text(text: str) -> str:
     """Auto-fix common LLM output issues instead of rejecting."""
     text = text.replace(" \u2014 ", ", ").replace("\u2014", ", ")   # em dash -> comma
@@ -96,12 +111,14 @@ def sanitize_text(text: str) -> str:
 
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
-def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dict:
+def validate_json_fields(data: dict, profile: dict, mode: str = "normal",
+                         original_text: str = "") -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
     Args:
         data:    Parsed JSON from the LLM (title, summary, skills, experience, projects, education).
         profile: User profile dict from load_profile().
+        original_text: The base resume text; skills it mentions are legitimate.
         mode:    Validation strictness — "strict", "normal", or "lenient".
                  strict  → banned words are errors (trigger retries)
                  normal  → banned words are warnings (no retry)
@@ -125,12 +142,9 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
 
     # Skills: check for fabrication (always enforced)
     if isinstance(data["skills"], dict):
-        skills_text = " ".join(str(v) for v in data["skills"].values()).lower()
-        for fake in FABRICATION_WATCHLIST:
-            if len(fake) <= 2:
-                continue
-            if fake in skills_text:
-                errors.append(f"Fabricated skill: '{fake}'")
+        skills_text = " ".join(str(v) for v in data["skills"].values())
+        for fake in _fabricated_terms(skills_text, profile, original_text):
+            errors.append(f"Fabricated skill: '{fake}'")
 
     # Experience: preserved companies must be present (always enforced)
     resume_facts = profile.get("resume_facts", {})
@@ -247,11 +261,8 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     skills_end = text_lower.find("experience", skills_start) if skills_start != -1 else -1
     if skills_start != -1 and skills_end != -1:
         skills_block = text_lower[skills_start:skills_end]
-        for fake in FABRICATION_WATCHLIST:
-            if len(fake) <= 2:
-                continue
-            if fake in skills_block:
-                errors.append(f"FABRICATED SKILL in Technical Skills: '{fake}'")
+        for fake in _fabricated_terms(skills_block, profile, original_text):
+            errors.append(f"FABRICATED SKILL in Technical Skills: '{fake}'")
 
     # 8. Scan full document for fabrication watchlist items not in original
     if original_text:

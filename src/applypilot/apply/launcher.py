@@ -64,23 +64,92 @@ if platform.system() != "Windows":
 # ---------------------------------------------------------------------------
 
 def _make_mcp_config(cdp_port: int) -> dict:
-    """Build MCP config dict for a specific CDP port."""
-    return {
-        "mcpServers": {
-            "playwright": {
-                "command": "npx",
-                "args": [
-                    "@playwright/mcp@latest",
-                    f"--cdp-endpoint=http://localhost:{cdp_port}",
-                    f"--viewport-size={config.DEFAULTS['viewport']}",
-                ],
-            },
-            "gmail": {
-                "command": "npx",
-                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
-            },
-        }
+    """Build MCP config dict for a specific CDP port.
+
+    Package versions are pinned (see config.DEFAULTS). Gmail is only added when
+    the user opts in, and even then the agent is limited to read-only tools.
+    """
+    servers: dict = {
+        "playwright": {
+            "command": "npx",
+            "args": [
+                "-y",
+                config.DEFAULTS["playwright_mcp_package"],
+                f"--cdp-endpoint=http://localhost:{cdp_port}",
+                f"--viewport-size={config.DEFAULTS['viewport']}",
+            ],
+        },
     }
+    if config.gmail_enabled():
+        servers["gmail"] = {
+            "command": "npx",
+            "args": ["-y", config.DEFAULTS["gmail_mcp_package"]],
+        }
+    return {"mcpServers": servers}
+
+
+# The apply agent may only drive the browser (and, if enabled, read mail).
+# Everything else is denied explicitly, because allow rules in the user's own
+# Claude settings would otherwise still apply.
+GMAIL_READ_TOOLS = ("mcp__gmail__search_emails", "mcp__gmail__read_email")
+DENIED_BUILTIN_TOOLS = (
+    "Bash", "PowerShell", "Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep",
+    "WebFetch", "WebSearch", "Task", "Agent", "Skill",
+)
+
+
+def _build_claude_cmd(claude_path: str, model: str, mcp_config_path: Path) -> list[str]:
+    """Build the locked-down Claude Code command line for one apply session."""
+    allowed = ["mcp__playwright"]
+    if config.gmail_enabled():
+        allowed.extend(GMAIL_READ_TOOLS)
+    return [
+        claude_path,
+        "--model", model,
+        "-p",
+        "--mcp-config", str(mcp_config_path),
+        "--strict-mcp-config",
+        "--permission-mode", "dontAsk",
+        "--allowedTools", ",".join(allowed),
+        "--disallowedTools", ",".join(DENIED_BUILTIN_TOOLS),
+        "--no-session-persistence",
+        "--output-format", "stream-json",
+        "--verbose", "-",
+    ]
+
+
+_RESULT_RE = re.compile(r"RESULT:([A-Z_]+)(?::[ \t]*([^\n]*))?")
+
+
+def parse_result(output: str, dry_run: bool = False) -> str:
+    """Map the agent's final RESULT line to a launcher status string.
+
+    Only the LAST ``RESULT:`` occurrence counts, so a code the agent mentions
+    while reasoning ("I'll output RESULT:APPLIED once...") can't be mistaken
+    for the outcome.
+
+    Returns one of: 'applied', 'dry_run', 'expired', 'captcha', 'login_issue',
+    'needs_human:<detail>', 'failed:<reason>', or 'failed:no_result_line'.
+    A dry run can never report 'applied'.
+    """
+    matches = list(_RESULT_RE.finditer(output))
+    if not matches:
+        return "failed:no_result_line"
+    code = matches[-1].group(1)
+    detail = re.sub(r'[*`"]+$', "", (matches[-1].group(2) or "")).strip()
+
+    if code == "APPLIED":
+        return "dry_run" if dry_run else "applied"
+    if code in ("DRY_RUN", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"):
+        return code.lower()
+    if code == "NEEDS_HUMAN":
+        return f"needs_human:{detail or 'unspecified'}"
+    if code == "FAILED":
+        reason = detail or "unknown"
+        if reason in ("captcha", "expired", "login_issue"):
+            return reason
+        return f"failed:{reason}"
+    return f"failed:unknown_result_{code.lower()}"
 
 
 # ---------------------------------------------------------------------------
@@ -88,13 +157,14 @@ def _make_mcp_config(cdp_port: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def acquire_job(target_url: str | None = None, min_score: int = 7,
-                worker_id: int = 0) -> dict | None:
+                worker_id: int = 0, dry_run: bool = False) -> dict | None:
     """Atomically acquire the next job to apply to.
 
     Args:
         target_url: Apply to a specific URL instead of picking from queue.
         min_score: Minimum fit_score threshold.
         worker_id: Worker claiming this job (for tracking).
+        dry_run: Skip jobs already rehearsed; real runs include them.
 
     Returns:
         Job dict or None if the queue is empty.
@@ -111,10 +181,11 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
+            retry_statuses = "'failed'" if dry_run else "'failed', 'dry_run'"
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
             params: list = [min_score]
@@ -132,7 +203,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
+                  AND (apply_status IS NULL OR apply_status IN ({retry_statuses}))
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
                   {site_clause}
@@ -193,6 +264,16 @@ def mark_result(url: str, status: str, error: str | None = None,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
         """, (status, error or "unknown", duration_ms, task_id, url))
+    conn.commit()
+
+
+def mark_dry_run(url: str) -> None:
+    """Record a completed dry run without treating the job as applied."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET apply_status = 'dry_run', agent_id = NULL WHERE url = ?",
+        (url,),
+    )
     conn.commit()
 
 
@@ -321,27 +402,10 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
     mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
 
-    # Build claude command
-    cmd = [
-        "claude",
-        "--model", model,
-        "-p",
-        "--mcp-config", str(mcp_config_path),
-        "--permission-mode", "bypassPermissions",
-        "--no-session-persistence",
-        "--disallowedTools", (
-            "mcp__gmail__draft_email,mcp__gmail__modify_email,"
-            "mcp__gmail__delete_email,mcp__gmail__download_attachment,"
-            "mcp__gmail__batch_modify_emails,mcp__gmail__batch_delete_emails,"
-            "mcp__gmail__create_label,mcp__gmail__update_label,"
-            "mcp__gmail__delete_label,mcp__gmail__get_or_create_label,"
-            "mcp__gmail__list_email_labels,mcp__gmail__create_filter,"
-            "mcp__gmail__list_filters,mcp__gmail__get_filter,"
-            "mcp__gmail__delete_filter"
-        ),
-        "--output-format", "stream-json",
-        "--verbose", "-",
-    ]
+    claude_path = config.get_claude_path()
+    if not claude_path:
+        return "failed:claude_cli_not_found", 0
+    cmd = _build_claude_cmd(claude_path, model, mcp_config_path)
 
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
@@ -367,6 +431,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     start = time.time()
     stats: dict = {}
     proc = None
+    watchdog: threading.Timer | None = None
+    timed_out = threading.Event()
 
     try:
         proc = subprocess.Popen(
@@ -382,6 +448,16 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         )
         with _claude_lock:
             _claude_procs[worker_id] = proc
+
+        # The stdout loop below blocks until the agent exits, so the timeout
+        # has to be enforced from another thread.
+        def _on_timeout(p: subprocess.Popen = proc) -> None:
+            timed_out.set()
+            _kill_process_tree(p.pid)
+
+        watchdog = threading.Timer(config.DEFAULTS["apply_timeout"], _on_timeout)
+        watchdog.daemon = True
+        watchdog.start()
 
         proc.stdin.write(agent_prompt)
         proc.stdin.close()
@@ -441,10 +517,13 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                     text_parts.append(line)
                     lf.write(line + "\n")
 
-        proc.wait(timeout=300)
+        proc.wait(timeout=30)
         returncode = proc.returncode
         proc = None
+        watchdog.cancel()
 
+        if timed_out.is_set():
+            raise subprocess.TimeoutExpired(cmd, config.DEFAULTS["apply_timeout"])
         if returncode and returncode < 0:
             return "skipped", int((time.time() - start) * 1000)
 
@@ -462,40 +541,13 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             prev_cost = ws.total_cost if ws else 0.0
             update_state(worker_id, total_cost=prev_cost + cost)
 
-        def _clean_reason(s: str) -> str:
-            return re.sub(r'[*`"]+$', '', s).strip()
-
-        for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
-            if f"RESULT:{result_status}" in output:
-                add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
-                update_state(worker_id, status=result_status.lower(),
-                             last_action=f"{result_status} ({elapsed}s)")
-                return result_status.lower(), duration_ms
-
-        if "RESULT:FAILED" in output:
-            for out_line in output.split("\n"):
-                if "RESULT:FAILED" in out_line:
-                    reason = (
-                        out_line.split("RESULT:FAILED:")[-1].strip()
-                        if ":" in out_line[out_line.index("FAILED") + 6:]
-                        else "unknown"
-                    )
-                    reason = _clean_reason(reason)
-                    PROMOTE_TO_STATUS = {"captcha", "expired", "login_issue"}
-                    if reason in PROMOTE_TO_STATUS:
-                        add_event(f"[W{worker_id}] {reason.upper()} ({elapsed}s): {job['title'][:30]}")
-                        update_state(worker_id, status=reason,
-                                     last_action=f"{reason.upper()} ({elapsed}s)")
-                        return reason, duration_ms
-                    add_event(f"[W{worker_id}] FAILED ({elapsed}s): {reason[:30]}")
-                    update_state(worker_id, status="failed",
-                                 last_action=f"FAILED: {reason[:25]}")
-                    return f"failed:{reason}", duration_ms
-            return "failed:unknown", duration_ms
-
-        add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
-        update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
-        return "failed:no_result_line", duration_ms
+        result = parse_result(output, dry_run=dry_run)
+        label = result.split(":", 1)[0]
+        detail = result.split(":", 1)[1] if ":" in result else ""
+        add_event(f"[W{worker_id}] {label.upper()} ({elapsed}s): {(detail or job['title'])[:30]}")
+        update_state(worker_id, status=label,
+                     last_action=f"{label.upper()} ({elapsed}s)"[:35])
+        return result, duration_ms
 
     except subprocess.TimeoutExpired:
         duration_ms = int((time.time() - start) * 1000)
@@ -509,6 +561,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         update_state(worker_id, status="failed", last_action=f"ERROR: {str(e)[:25]}")
         return f"failed:{str(e)[:100]}", duration_ms
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         with _claude_lock:
             _claude_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:
@@ -524,11 +578,21 @@ PERMANENT_FAILURES: set[str] = {
     "not_eligible_location", "not_eligible_salary",
     "already_applied", "account_required",
     "not_a_job_application", "unsafe_permissions",
-    "unsafe_verification", "sso_required",
+    "unsafe_verification", "sso_required", "suspicious_page",
     "site_blocked", "cloudflare_blocked", "blocked_by_cloudflare",
 }
 
 PERMANENT_PREFIXES: tuple[str, ...] = ("site_blocked", "cloudflare", "blocked_by")
+
+# Outcomes the candidate must finish by hand. They are stored with
+# apply_status='manual' and the reason (e.g. the unanswered question).
+MANUAL_RESULTS: set[str] = {"captcha", "login_issue", "account_required", "sso_required"}
+
+
+def _needs_manual(result: str) -> bool:
+    """Whether an apply outcome should be handed back to the candidate."""
+    reason = result.split(":", 1)[-1] if ":" in result else result
+    return result.startswith("needs_human:") or result in MANUAL_RESULTS or reason in MANUAL_RESULTS
 
 
 def _is_permanent_failure(result: str) -> bool:
@@ -578,7 +642,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                      last_action="waiting for job", actions=0)
 
         job = acquire_job(target_url=target_url, min_score=min_score,
-                          worker_id=worker_id)
+                          worker_id=worker_id, dry_run=dry_run)
         if not job:
             if not continuous:
                 add_event(f"[W{worker_id}] Queue empty")
@@ -608,6 +672,16 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
                 continue
+            elif result == "dry_run":
+                # Rehearsed, not applied: later dry runs skip it, real runs still pick it up.
+                mark_dry_run(job["url"])
+            elif _needs_manual(result):
+                reason = result.split(":", 1)[-1] if ":" in result else result
+                mark_result(job["url"], "manual", reason, permanent=True,
+                            duration_ms=duration_ms)
+                failed += 1
+                update_state(worker_id, jobs_failed=failed,
+                             jobs_done=applied + failed)
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
