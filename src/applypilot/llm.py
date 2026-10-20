@@ -300,6 +300,14 @@ CLAUDE_TASK_MODELS: dict[str, str] = {
     "cover": "sonnet",
 }
 
+# Reasoning effort per task. Scoring and extraction are structured, run on
+# every job, and measured about 2x faster at "low" with the same answers.
+# Tasks not listed use the CLI default.
+CLAUDE_TASK_EFFORT: dict[str, str] = {
+    "extract": "low",
+    "score": "low",
+}
+
 _CLAUDE_TIMEOUT = 300  # seconds per call
 _CLAUDE_MAX_PARALLEL = 2  # be gentle with subscription rate limits
 _claude_slots = threading.BoundedSemaphore(_CLAUDE_MAX_PARALLEL)
@@ -327,7 +335,13 @@ def claude_model_for(task: str) -> str:
     )
 
 
-def build_claude_cmd(claude_path: str, model: str, system_prompt_file: str | None) -> list[str]:
+def claude_effort_for(task: str) -> str | None:
+    """Resolve the reasoning effort for a task (CLAUDE_EFFORT_<TASK> overrides the default)."""
+    return os.environ.get(f"CLAUDE_EFFORT_{task.upper()}") or CLAUDE_TASK_EFFORT.get(task)
+
+
+def build_claude_cmd(claude_path: str, model: str, system_prompt_file: str | None,
+                     effort: str | None = None) -> list[str]:
     """Plain text-in/text-out Claude call: no tools, MCP, hooks, CLAUDE.md or skills.
 
     ``--safe-mode`` drops every user customization (your hooks would otherwise
@@ -347,6 +361,8 @@ def build_claude_cmd(claude_path: str, model: str, system_prompt_file: str | Non
     ]
     if system_prompt_file:
         cmd += ["--system-prompt-file", system_prompt_file]
+    if effort:
+        cmd += ["--effort", effort]
     return cmd
 
 
@@ -460,7 +476,7 @@ class ClaudeCLIClient:
         try:
             with _claude_slots:
                 proc = subprocess.run(
-                    build_claude_cmd(self.claude_path, self.model, sp_file),
+                    build_claude_cmd(self.claude_path, self.model, sp_file, claude_effort_for(self.task)),
                     input=prompt,
                     capture_output=True,
                     text=True,

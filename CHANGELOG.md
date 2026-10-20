@@ -23,6 +23,8 @@ Safety and honesty pass for auto-apply, plus correctness fixes. Claude as the LL
   at 5 when the posted salary tops out below `min_salary`.
   Work mode is stored in a new `work_mode` column; `prioritize_work_modes` breaks score ties
   when picking the next job to apply to (jobs scored earlier need `run score --rescore` for this).
+- **Low reasoning effort for bulk tasks** - scoring and extraction run with `--effort low`
+  (about 2x faster in testing, same answers); override with `CLAUDE_EFFORT_<TASK>`.
 - **Usage log** - every Claude call and apply session is recorded in `logs/llm_usage.jsonl`;
   `applypilot status` shows the last 7 days (calls, tokens, API-equivalent cost).
 - **Usage-limit handling** - hitting the plan's usage limit stops the stage instead of retrying;

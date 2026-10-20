@@ -45,7 +45,7 @@ SALARY_MAX: [top of the posted annual base salary range in USD as a plain number
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
 REASONING: [2-3 sentences explaining the score]
 
-WORK_MODE: remote_global = fully remote and open to working from other countries; remote_country = fully remote but limited to specific countries or regions; hybrid = some days in an office; onsite = in an office full time.
+WORK_MODE: remote_global = fully remote and open to working from other countries; remote_country = fully remote but limited to specific countries or regions; hybrid = some days in an office; onsite = in an office full time. If the posting names an office location and never mentions remote or hybrid work, use onsite.
 LOCATION_MATCH: yes if the candidate can do this job from where they are based (remote: their country is in the allowed region; hybrid/onsite: within commuting distance of one of their preferred locations).
 SENIORITY: the level the posting is hiring for (junior = entry level or under 2 years; mid = about 2-5 years; senior = about 5+ years; staff_plus = staff, principal or above).
 SALARY_MAX: only from a salary actually stated in the posting (convert hourly x 2080); never estimate."""

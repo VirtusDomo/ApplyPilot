@@ -16,6 +16,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
         monkeypatch.delenv(var, raising=False)
     for task in llm.CLAUDE_TASK_MODELS:
         monkeypatch.delenv(f"CLAUDE_MODEL_{task.upper()}", raising=False)
+        monkeypatch.delenv(f"CLAUDE_EFFORT_{task.upper()}", raising=False)
     monkeypatch.setattr(config, "get_claude_path", lambda: "C:/bin/claude.exe")
     monkeypatch.setattr(config, "LOG_DIR", tmp_path)
     monkeypatch.setattr(llm, "_instance", None)
@@ -100,6 +101,16 @@ def test_cmd_is_locked_down() -> None:
     assert cmd[cmd.index("--system-prompt-file") + 1] == "sys.md"
     assert "bypassPermissions" not in cmd
     assert "--dangerously-skip-permissions" not in cmd
+
+
+def test_bulk_tasks_run_at_low_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert llm.claude_effort_for("score") == "low"
+    assert llm.claude_effort_for("tailor") is None  # writing keeps the CLI default
+    monkeypatch.setenv("CLAUDE_EFFORT_TAILOR", "high")
+    assert llm.claude_effort_for("tailor") == "high"
+    cmd = llm.build_claude_cmd("claude", "haiku", None, "low")
+    assert cmd[cmd.index("--effort") + 1] == "low"
+    assert "--effort" not in llm.build_claude_cmd("claude", "haiku", None)
 
 
 def test_system_and_user_messages_are_split() -> None:
