@@ -69,7 +69,7 @@ FABRICATION_WATCHLIST: set[str] = {
     "certif", "certified", "pmp", "scrum master", "aws certified",
 }
 
-REQUIRED_SECTIONS: set[str] = {"SUMMARY", "TECHNICAL SKILLS", "EXPERIENCE", "PROJECTS", "EDUCATION"}
+REQUIRED_SECTIONS: set[str] = {"SUMMARY", "TECHNICAL SKILLS", "EXPERIENCE", "EDUCATION"}  # PROJECTS optional
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -130,12 +130,16 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal",
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Required keys — always checked regardless of mode
-    for key in ("title", "summary", "skills", "experience", "projects", "education"):
+    # Required keys — always checked regardless of mode. Projects are optional:
+    # many experienced engineers' resumes have none.
+    for key in ("title", "summary", "skills", "experience", "education"):
         if key not in data or not data[key]:
             errors.append(f"Missing required field: {key}")
     if errors:
         return {"passed": False, "errors": errors, "warnings": warnings}
+    data.setdefault("projects", [])
+    if data["projects"] is None:
+        data["projects"] = []
 
     # Collect all text for bulk checks
     all_text_parts: list[str] = [data["summary"]]
@@ -221,7 +225,6 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
         "SUMMARY": ["summary", "professional summary", "profile"],
         "TECHNICAL SKILLS": ["technical skills", "skills", "tech stack", "core skills", "technologies"],
         "EXPERIENCE": ["experience", "work experience", "professional experience"],
-        "PROJECTS": ["projects", "personal projects", "key projects", "selected projects"],
         "EDUCATION": ["education", "academic background"],
     }
     for section, variants in section_variants.items():

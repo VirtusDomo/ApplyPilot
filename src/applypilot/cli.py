@@ -319,6 +319,21 @@ def status() -> None:
 
         console.print(site_table)
 
+    # Claude usage (subscription runs only)
+    from applypilot.llm import usage_summary
+
+    usage = usage_summary(days=7)
+    if usage:
+        usage_table = Table(title="\nClaude Usage, Last 7 Days", show_header=True, header_style="bold blue")
+        usage_table.add_column("Kind")
+        usage_table.add_column("Calls", justify="right")
+        usage_table.add_column("Tokens", justify="right")
+        usage_table.add_column("API-equivalent $", justify="right")
+        for kind, t in sorted(usage.items()):
+            usage_table.add_row(kind, str(t["calls"]), f"{t['tokens']:,}", f"{t['cost_usd']:.2f}")
+        console.print(usage_table)
+        console.print("[dim]Not billed on Pro/Max; shows how fast runs use up your plan's limits.[/dim]")
+
     console.print()
 
 

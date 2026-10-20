@@ -11,7 +11,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from applypilot.config import RESUME_PATH, load_profile
+from applypilot.config import RESUME_PATH, load_profile, load_search_config
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import ClaudeUsageLimitError, get_client
 
@@ -34,11 +34,71 @@ IMPORTANT FACTORS:
 - Consider transferable experience (automation, scripting, API work)
 - Factor in the candidate's project experience
 - Be realistic about experience level vs. job requirements (years of experience, seniority)
-
+- SCORE is skills and experience fit only. Report location and seniority on their own lines below.
+{context}
 RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]
+WORK_MODE: [remote_global | remote_country | hybrid | onsite | unknown]
+LOCATION_MATCH: [yes | no | unknown]
+SENIORITY: [junior | mid | senior | staff_plus | unknown]
 KEYWORDS: [comma-separated ATS keywords from the job description that match or could match the candidate]
-REASONING: [2-3 sentences explaining the score]"""
+REASONING: [2-3 sentences explaining the score]
+
+WORK_MODE: remote_global = fully remote and open to working from other countries; remote_country = fully remote but limited to specific countries or regions; hybrid = some days in an office; onsite = in an office full time.
+LOCATION_MATCH: yes if the candidate can do this job from where they are based (remote: their country is in the allowed region; hybrid/onsite: within commuting distance of one of their preferred locations).
+SENIORITY: the level the posting is hiring for (junior = entry level or under 2 years; mid = about 2-5 years; senior = about 5+ years; staff_plus = staff, principal or above)."""
+
+WORK_MODES = ("remote_global", "remote_country", "hybrid", "onsite")
+SENIORITY_LEVELS = ("junior", "mid", "senior", "staff_plus")
+
+
+def build_score_prompt(prefs: dict | None = None) -> str:
+    """Fill the scoring prompt with the candidate context from searches.yaml ``preferences``."""
+    prefs = prefs or {}
+    lines = []
+    if prefs.get("base_location"):
+        lines.append(f"- Candidate is based in: {prefs['base_location']}")
+    if prefs.get("preferred_locations"):
+        lines.append("- Preferred locations for hybrid/on-site work: "
+                     + "; ".join(prefs["preferred_locations"]))
+    context = ("\nCANDIDATE CONTEXT:\n" + "\n".join(lines) + "\n") if lines else ""
+    return SCORE_PROMPT.format(context=context)
+
+
+def title_excluded(title: str, patterns: list[str]) -> str | None:
+    """Return the ``exclude_titles`` pattern a job title matches, if any (case-insensitive)."""
+    padded = f" {title.lower()} "
+    for pattern in patterns:
+        if pattern and pattern.lower() in padded:
+            return pattern
+    return None
+
+
+def apply_preferences(result: dict, prefs: dict | None) -> dict:
+    """Cap the fit score when the job is the wrong level or in a place the candidate can't work.
+
+    The LLM reports facts (work mode, location match, seniority); the caps are
+    applied here so they are predictable. Unknown values never cap.
+    """
+    prefs = prefs or {}
+    caps: list[tuple[int, str]] = []
+    # Without a base location the model has nothing to judge location against.
+    if prefs.get("base_location") and result.get("location_match") == "no":
+        caps.append((3, "location not workable"))
+    allowed_modes = prefs.get("work_modes")
+    if allowed_modes and result.get("work_mode") in WORK_MODES and result["work_mode"] not in allowed_modes:
+        caps.append((3, f"{result['work_mode']} not wanted"))
+    allowed_levels = prefs.get("seniority")
+    if (allowed_levels and result.get("seniority") in SENIORITY_LEVELS
+            and result["seniority"] not in allowed_levels):
+        caps.append((4, f"{result['seniority']} level not targeted"))
+
+    if caps:
+        cap, reason = min(caps)
+        if result["score"] > cap:
+            result["reasoning"] = f"[capped {result['score']}->{cap}: {reason}] {result['reasoning']}"
+            result["score"] = cap
+    return result
 
 
 def _parse_score_response(response: str) -> dict:
@@ -48,14 +108,17 @@ def _parse_score_response(response: str) -> dict:
         response: Raw LLM response text.
 
     Returns:
-        {"score": int, "keywords": str, "reasoning": str}
+        {"score": int, "keywords": str, "reasoning": str,
+         "work_mode": str|None, "location_match": str|None, "seniority": str|None}
     """
     score = 0
     keywords = ""
     reasoning = response
+    labels: dict[str, str | None] = {"work_mode": None, "location_match": None, "seniority": None}
 
     for line in response.split("\n"):
-        line = line.strip()
+        # Tolerate markdown decoration such as "**SCORE:** 7" or "- SCORE: 7".
+        line = re.sub(r"^[\s*#>-]+", "", line).replace("**", "").strip()
         if line.startswith("SCORE:"):
             try:
                 score = int(re.search(r"\d+", line).group())
@@ -66,19 +129,27 @@ def _parse_score_response(response: str) -> dict:
             keywords = line.replace("KEYWORDS:", "").strip()
         elif line.startswith("REASONING:"):
             reasoning = line.replace("REASONING:", "").strip()
+        else:
+            for key in labels:
+                tag = key.upper() + ":"
+                if line.startswith(tag):
+                    value = line[len(tag):].strip().strip("[]").lower()
+                    labels[key] = None if value in ("", "unknown") else value
 
-    return {"score": score, "keywords": keywords, "reasoning": reasoning}
+    return {"score": score, "keywords": keywords, "reasoning": reasoning, **labels}
 
 
-def score_job(resume_text: str, job: dict) -> dict:
+def score_job(resume_text: str, job: dict, prefs: dict | None = None) -> dict:
     """Score a single job against the resume.
 
     Args:
         resume_text: The candidate's full resume text.
         job: Job dict with keys: title, site, location, full_description.
+        prefs: The ``preferences`` section of searches.yaml (optional).
 
     Returns:
-        {"score": int, "keywords": str, "reasoning": str}
+        {"score": int, "keywords": str, "reasoning": str, "work_mode": str|None, ...}
+        with ``"error": True`` when the job could not be scored.
     """
     job_text = (
         f"TITLE: {job['title']}\n"
@@ -88,20 +159,26 @@ def score_job(resume_text: str, job: dict) -> dict:
     )
 
     messages = [
-        {"role": "system", "content": SCORE_PROMPT},
+        {"role": "system", "content": build_score_prompt(prefs)},
         {"role": "user", "content": f"RESUME:\n{resume_text}\n\n---\n\nJOB POSTING:\n{job_text}"},
     ]
 
     try:
         client = get_client("score")
         response = client.chat(messages, max_tokens=512, temperature=0.2)
-        return _parse_score_response(response)
     except ClaudeUsageLimitError:
         raise
     except Exception as e:
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
         # Flagged so the job stays unscored and is retried next run.
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}", "error": True}
+
+    result = _parse_score_response(response)
+    if result["score"] == 0:
+        # Saved as 0 (not retried): a reply that can't be parsed now likely never will be.
+        log.error("Unparseable score for '%s': %s", job.get("title", "?"), response[:200])
+        return {**result, "reasoning": f"Unparseable LLM reply: {response[:300]}"}
+    return apply_preferences(result, prefs)
 
 
 def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
@@ -134,6 +211,10 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         columns = jobs[0].keys()
         jobs = [dict(zip(columns, row)) for row in jobs]
 
+    search_cfg = load_search_config() or {}
+    prefs = search_cfg.get("preferences") or {}
+    exclude = search_cfg.get("exclude_titles") or []
+
     log.info("Scoring %d jobs sequentially...", len(jobs))
     t0 = time.time()
     completed = 0
@@ -141,33 +222,37 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     results: list[dict] = []
 
     for job in jobs:
+        pattern = title_excluded(job.get("title") or "", exclude)
         try:
-            result = score_job(resume_text, job)
+            if pattern:
+                # No LLM call: the user never wants this title.
+                result = {"score": 1, "keywords": "", "work_mode": None,
+                          "reasoning": f"Excluded title (exclude_titles: {pattern!r})"}
+            else:
+                result = score_job(resume_text, job, prefs)
         except ClaudeUsageLimitError as e:
             log.error("Stopping: %s. Unscored jobs stay queued for the next run.", e)
             break
         result["url"] = job["url"]
         completed += 1
 
-        if result["score"] == 0:
+        if result.get("error"):
             errors += 1
-
-        results.append(result)
+        else:
+            # Saved per job so a long run that stops early keeps its progress.
+            conn.execute(
+                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, work_mode = ?, scored_at = ? "
+                "WHERE url = ?",
+                (result["score"], f"{result['keywords']}\n{result['reasoning']}",
+                 result.get("work_mode"), datetime.now(timezone.utc).isoformat(), result["url"]),
+            )
+            conn.commit()
+            results.append(result)
 
         log.info(
             "[%d/%d] score=%d  %s",
             completed, len(jobs), result["score"], job.get("title", "?")[:60],
         )
-
-    # Write scores to DB
-    now = datetime.now(timezone.utc).isoformat()
-    results = [r for r in results if not r.get("error")]
-    for r in results:
-        conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
-            (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),
-        )
-    conn.commit()
 
     elapsed = time.time() - t0
     log.info("Done: %d scored in %.1fs (%.1f jobs/sec)", len(results), elapsed, len(results) / elapsed if elapsed > 0 else 0)

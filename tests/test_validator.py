@@ -38,3 +38,15 @@ def test_skill_in_original_resume_is_allowed() -> None:
 def test_real_certification_is_allowed_only_when_claimed() -> None:
     assert "certified" in _fabricated_terms("AWS Certified", PROFILE)
     assert _fabricated_terms("AWS Certified", PROFILE, original_text="AWS Certified Developer") == []
+
+
+def test_resume_without_projects_passes() -> None:
+    # Many senior resumes have no projects section; tailoring used to fail every time.
+    for projects in (None, []):
+        data = _resume("Python")
+        data["projects"] = projects
+        result = validate_json_fields(data, PROFILE)
+        assert result["passed"], result["errors"]
+    data = _resume("Python")
+    del data["projects"]
+    assert validate_json_fields(data, PROFILE)["passed"]

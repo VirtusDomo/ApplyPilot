@@ -11,12 +11,13 @@ PROVIDER_VARS = ("LLM_PROVIDER", "LLM_URL", "GEMINI_API_KEY", "OPENAI_API_KEY", 
 
 
 @pytest.fixture(autouse=True)
-def clean_env(monkeypatch: pytest.MonkeyPatch):
+def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     for var in PROVIDER_VARS:
         monkeypatch.delenv(var, raising=False)
     for task in llm.CLAUDE_TASK_MODELS:
         monkeypatch.delenv(f"CLAUDE_MODEL_{task.upper()}", raising=False)
     monkeypatch.setattr(config, "get_claude_path", lambda: "C:/bin/claude.exe")
+    monkeypatch.setattr(config, "LOG_DIR", tmp_path)
     monkeypatch.setattr(llm, "_instance", None)
     monkeypatch.setattr(llm, "_claude_clients", {})
 
@@ -65,6 +66,14 @@ def test_cheap_model_for_bulk_tasks_and_sonnet_for_writing() -> None:
     assert llm.get_client("tailor").model == "sonnet"
     assert llm.get_client("judge").model == "sonnet"
     assert llm.get_client("cover").model == "sonnet"
+
+
+def test_usage_is_logged_per_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 0, stdout=_cli_json(total_cost_usd=0.01), stderr=""))
+    llm.get_client("tailor").ask("a")
+    llm.get_client("judge").ask("b")  # same model, separate row
+    assert set(llm.usage_summary(1)) == {"tailor", "judge"}
 
 
 def test_task_override_beats_global_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,6 +139,19 @@ def test_other_errors_raise_runtime_error() -> None:
     with pytest.raises(RuntimeError) as exc:
         llm.parse_claude_output(_cli_json(subtype="error", is_error=True, result="overloaded"))
     assert not isinstance(exc.value, llm.ClaudeUsageLimitError)
+
+
+def test_every_call_is_logged_with_its_cost() -> None:
+    llm.parse_claude_output(_cli_json(total_cost_usd=0.01, usage={"input_tokens": 100}), kind="haiku")
+    with pytest.raises(RuntimeError):
+        llm.parse_claude_output(_cli_json(subtype="error", is_error=True, total_cost_usd=0.02,
+                                          result="overloaded"), kind="haiku")
+    llm.record_usage("apply", {"total_cost_usd": 1.5, "usage": {"output_tokens": 50}})
+
+    totals = llm.usage_summary(days=1)
+    assert totals["haiku"]["calls"] == 2
+    assert totals["haiku"]["cost_usd"] == pytest.approx(0.03)
+    assert totals["apply"] == {"calls": 1, "cost_usd": 1.5, "tokens": 50}
 
 
 def test_garbage_output_raises() -> None:

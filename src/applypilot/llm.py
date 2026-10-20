@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -359,12 +360,74 @@ def _render_messages(messages: list[dict]) -> tuple[str, str]:
     return system, "\n\n".join(f"[{m['role'].upper()}]\n{m.get('content') or ''}" for m in turns)
 
 
-def parse_claude_output(stdout: str) -> str:
-    """Return the reply text from ``--output-format json`` output, or raise."""
+_usage_lock = threading.Lock()
+
+
+def usage_log_path() -> Path:
+    return config.LOG_DIR / "llm_usage.jsonl"
+
+
+def record_usage(kind: str, result: dict) -> None:
+    """Append one Claude call's usage (from a CLI ``result`` message) to the usage log.
+
+    ``cost_usd`` is the API-list-price equivalent the CLI reports. On a
+    subscription nothing is billed per call, but it is the best available
+    measure of how fast a run eats into the plan's usage limits.
+    """
+    usage = result.get("usage") or {}
+    entry = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "kind": kind,
+        "models": sorted((result.get("modelUsage") or {}).keys()),
+        "cost_usd": result.get("total_cost_usd") or 0,
+        "input_tokens": usage.get("input_tokens") or 0,
+        "output_tokens": usage.get("output_tokens") or 0,
+        "cache_read": usage.get("cache_read_input_tokens") or 0,
+        "cache_create": usage.get("cache_creation_input_tokens") or 0,
+        "turns": result.get("num_turns") or 0,
+        "ok": not result.get("is_error"),
+    }
+    try:
+        path = usage_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _usage_lock, path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError:
+        log.debug("Could not write usage log", exc_info=True)
+
+
+def usage_summary(days: int = 7) -> dict[str, dict]:
+    """Totals per call kind over the last ``days`` days: {kind: {calls, cost_usd, tokens}}."""
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    totals: dict[str, dict] = {}
+    path = usage_log_path()
+    if not path.exists():
+        return totals
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("ts", "") < cutoff:
+            continue
+        t = totals.setdefault(entry.get("kind", "?"), {"calls": 0, "cost_usd": 0.0, "tokens": 0})
+        t["calls"] += 1
+        t["cost_usd"] += entry.get("cost_usd") or 0
+        t["tokens"] += sum(entry.get(k) or 0 for k in
+                           ("input_tokens", "output_tokens", "cache_read", "cache_create"))
+    return totals
+
+
+def parse_claude_output(stdout: str, kind: str = "llm") -> str:
+    """Return the reply text from ``--output-format json`` output, or raise.
+
+    Every parsed result, success or error, is recorded in the usage log.
+    """
     try:
         data = json.loads(stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError) as exc:
         raise RuntimeError(f"Unreadable Claude CLI output: {stdout[:300]!r}") from exc
+    record_usage(kind, data)
 
     if not data.get("is_error") and data.get("subtype") == "success":
         return data.get("result", "")
@@ -383,9 +446,10 @@ class ClaudeCLIClient:
     the CLI does not expose them.
     """
 
-    def __init__(self, claude_path: str, model: str) -> None:
+    def __init__(self, claude_path: str, model: str, task: str = "default") -> None:
         self.claude_path = claude_path
         self.model = model
+        self.task = task  # label for the usage log
 
     def _run_once(self, system: str, prompt: str) -> str:
         sp_file = None
@@ -415,7 +479,7 @@ class ClaudeCLIClient:
             raise RuntimeError(
                 f"Claude CLI exited {proc.returncode} with no output: {proc.stderr[:300]}"
             )
-        return parse_claude_output(proc.stdout)
+        return parse_claude_output(proc.stdout, kind=self.task)
 
     def chat(
         self,
@@ -475,10 +539,12 @@ def get_client(task: str = "default") -> LLMClient | ClaudeCLIClient:
     with _lock:
         if config.llm_provider() == "claude":
             model = claude_model_for(task)
-            if model not in _claude_clients:
-                log.info("LLM provider: Claude Code CLI  model: %s", model)
-                _claude_clients[model] = ClaudeCLIClient(config.get_claude_path() or "claude", model)
-            return _claude_clients[model]
+            client = _claude_clients.get(task)
+            if client is None or client.model != model:
+                log.info("LLM provider: Claude Code CLI  task: %s  model: %s", task, model)
+                client = ClaudeCLIClient(config.get_claude_path() or "claude", model, task)
+                _claude_clients[task] = client
+            return client
 
         if _instance is None:
             base_url, model, api_key = _detect_provider()

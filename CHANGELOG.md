@@ -16,6 +16,14 @@ Safety and honesty pass for auto-apply, plus correctness fixes. Claude as the LL
   Per-task models: Haiku for scoring/extraction, Sonnet for tailoring/judge/cover letters,
   overridable with `CLAUDE_MODEL` or `CLAUDE_MODEL_<TASK>`. Calls run with `--safe-mode --tools ""
   --strict-mcp-config`: no tools, MCP servers, hooks or user CLAUDE.md. At most 2 run at once.
+- **Preference-aware scoring** - the scorer now also reports each job's work mode
+  (remote_global / remote_country / hybrid / onsite), whether the candidate can work it from
+  their base location, and its seniority. A new `preferences` section in searches.yaml caps the
+  score at 3 for unworkable locations or unwanted work modes, and at 4 for untargeted levels.
+  Work mode is stored in a new `work_mode` column; `prioritize_work_modes` breaks score ties
+  when picking the next job to apply to (jobs scored earlier need `run score --rescore` for this).
+- **Usage log** - every Claude call and apply session is recorded in `logs/llm_usage.jsonl`;
+  `applypilot status` shows the last 7 days (calls, tokens, API-equivalent cost).
 - **Usage-limit handling** - hitting the plan's usage limit stops the stage instead of retrying;
   unprocessed jobs stay queued.
 
@@ -49,6 +57,10 @@ Safety and honesty pass for auto-apply, plus correctness fixes. Claude as the LL
 - `apply_timeout` default raised to 600s, now actually enforced.
 
 ### Fixed
+- **`exclude_titles` was never applied** - matching jobs now get score 1 without an LLM call.
+- **Resumes without a projects section always failed tailoring** - projects are now optional.
+- **Scores were only saved at the end of a run** - each score is saved as it completes.
+- `applypilot init` no longer overwrites an existing searches.yaml without asking.
 - **LLM errors were saved as a score of 0** - a failed scoring call now leaves the job unscored so
   it is retried on the next run, instead of permanently ranking it at the bottom.
 - **Dry runs were recorded as applied** (#104) - new `RESULT:DRY_RUN` / `apply_status='dry_run'`;

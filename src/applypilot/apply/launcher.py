@@ -24,6 +24,7 @@ from rich.live import Live
 
 from applypilot import config
 from applypilot.database import get_connection
+from applypilot.llm import record_usage
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
@@ -159,6 +160,21 @@ def parse_result(output: str, dry_run: bool = False) -> str:
 # Database operations
 # ---------------------------------------------------------------------------
 
+def _work_mode_priority() -> list[str]:
+    """``preferences.prioritize_work_modes`` from searches.yaml, as a list of strings."""
+    import yaml
+
+    try:
+        prefs = (config.load_search_config() or {}).get("preferences") or {}
+    except (OSError, yaml.YAMLError, AttributeError) as e:  # a broken searches.yaml must not stop applying
+        logger.warning("Ignoring prioritize_work_modes: cannot read searches.yaml (%s)", e)
+        return []
+    modes = prefs.get("prioritize_work_modes") or []
+    if isinstance(modes, str):
+        modes = [modes]
+    return [str(m) for m in modes]
+
+
 def acquire_job(target_url: str | None = None, min_score: int = 7,
                 worker_id: int = 0, dry_run: bool = False) -> dict | None:
     """Atomically acquire the next job to apply to.
@@ -172,6 +188,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
     Returns:
         Job dict or None if the queue is empty.
     """
+    priority = _work_mode_priority()
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -201,6 +218,10 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             if blocked_patterns:
                 url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
+            # Among equal scores, apply to preferred work modes first.
+            mode_order = "".join(f"WHEN ? THEN {i} " for i in range(len(priority)))
+            mode_order = f"CASE work_mode {mode_order}ELSE {len(priority)} END, " if priority else ""
+            params.extend(priority)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
@@ -211,7 +232,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
-                ORDER BY fit_score DESC, url
+                ORDER BY fit_score DESC, {mode_order}url
                 LIMIT 1
             """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
 
@@ -505,6 +526,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                                              actions=cur_actions + 1,
                                              last_action=desc[:35])
                     elif msg_type == "result":
+                        record_usage("apply", msg)
                         stats = {
                             "input_tokens": msg.get("usage", {}).get("input_tokens", 0),
                             "output_tokens": msg.get("usage", {}).get("output_tokens", 0),

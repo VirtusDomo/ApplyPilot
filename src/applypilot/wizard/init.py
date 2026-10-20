@@ -203,6 +203,11 @@ def _setup_searches() -> None:
     """Generate a searches.yaml from user input."""
     console.print(Panel("[bold]Step 3: Job Search Config[/bold]\nDefine what you're looking for."))
 
+    if SEARCH_CONFIG_PATH.exists() and Confirm.ask(
+        f"Keep your existing {SEARCH_CONFIG_PATH.name}?", default=True
+    ):
+        return
+
     location = Prompt.ask("Target location (e.g. 'Remote', 'Canada', 'New York, NY')", default="Remote")
     distance_str = Prompt.ask("Search radius in miles (0 for remote-only)", default="0")
     try:

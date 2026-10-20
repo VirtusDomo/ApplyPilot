@@ -81,3 +81,28 @@ def test_mcp_packages_are_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
         package = next(a for a in server["args"] if a.startswith("@"))
         assert "@latest" not in package
         assert package.rsplit("@", 1)[1][0].isdigit(), package
+
+
+@pytest.mark.parametrize(("priority", "expected"), [
+    ([], "https://jobs.example.com/a"),
+    (["remote_global"], "https://jobs.example.com/z"),
+    ("remote_global", "https://jobs.example.com/z"),  # a bare string works too
+])
+def test_equal_scores_apply_to_preferred_work_mode_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, priority: list, expected: str,
+) -> None:
+    from applypilot import config, database
+
+    conn = database.init_db(tmp_path / "jobs.db")
+    for url, mode in (("https://jobs.example.com/a", "onsite"),
+                      ("https://jobs.example.com/z", "remote_global")):
+        conn.execute(
+            "INSERT INTO jobs (url, title, site, fit_score, work_mode, tailored_resume_path) "
+            "VALUES (?, 'SWE', 'Example', 8, ?, 'r.txt')", (url, mode))
+    conn.commit()
+    monkeypatch.setattr(launcher, "get_connection", lambda: conn)
+    monkeypatch.setattr(launcher, "_load_blocked", lambda: ([], []))
+    monkeypatch.setattr(config, "load_search_config",
+                        lambda: {"preferences": {"prioritize_work_modes": priority}})
+
+    assert launcher.acquire_job(min_score=7)["url"] == expected
