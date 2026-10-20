@@ -380,20 +380,24 @@ def doctor() -> None:
 
     # --- Tier 2 checks ---
     import os
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
+
+    from applypilot.config import llm_provider
+    from applypilot.llm import CLAUDE_TASK_MODELS, claude_model_for
+    provider = llm_provider()
+    if provider == "claude":
+        models = ", ".join(f"{t}={claude_model_for(t)}" for t in CLAUDE_TASK_MODELS if t != "default")
+        results.append(("LLM", ok_mark, f"Claude Code CLI on your subscription ({models})"))
+    elif provider == "gemini":
         model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
+        results.append(("LLM", ok_mark, f"Gemini ({model})"))
+    elif provider == "openai":
         model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
+        results.append(("LLM", ok_mark, f"OpenAI ({model})"))
+    elif provider == "local":
+        results.append(("LLM", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
     else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+        results.append(("LLM", fail_mark,
+                        "Install Claude Code, or set an API key in ~/.applypilot/.env (run 'applypilot init')"))
 
     # --- Tier 3 checks ---
     # Claude Code CLI

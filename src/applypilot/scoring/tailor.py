@@ -18,7 +18,7 @@ from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     FABRICATION_WATCHLIST,
@@ -322,7 +322,7 @@ def judge_tailored_resume(
         )},
     ]
 
-    client = get_client()
+    client = get_client("judge")
     response = client.chat(messages, max_tokens=512, temperature=0.1)
 
     passed = "VERDICT: PASS" in response.upper()
@@ -379,7 +379,7 @@ def tailor_resume(
     }
     avoid_notes: list[str] = []
     tailored = ""
-    client = get_client()
+    client = get_client("tailor")
     tailor_prompt_base = _build_tailor_prompt(profile)
 
     for attempt in range(max_retries + 1):
@@ -531,6 +531,9 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "status": report["status"],
                 "attempts": report["attempts"],
             }
+        except ClaudeUsageLimitError as e:
+            log.error("Stopping: %s. Unprocessed jobs stay queued for the next run.", e)
+            break
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],

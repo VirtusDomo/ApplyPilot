@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Safety and honesty pass for auto-apply, plus correctness fixes.
+Safety and honesty pass for auto-apply, plus correctness fixes. Claude as the LLM provider.
+
+### Added
+- **Claude provider** - scoring, extraction, tailoring, the fabrication judge and cover letters can
+  run through the Claude Code CLI on the user's Claude subscription (no API key). It is the default
+  when `claude` is installed and no API key is configured; `LLM_PROVIDER` forces a provider.
+  Per-task models: Haiku for scoring/extraction, Sonnet for tailoring/judge/cover letters,
+  overridable with `CLAUDE_MODEL` or `CLAUDE_MODEL_<TASK>`. Calls run with `--safe-mode --tools ""
+  --strict-mcp-config`: no tools, MCP servers, hooks or user CLAUDE.md. At most 2 run at once.
+- **Usage-limit handling** - hitting the plan's usage limit stops the stage instead of retrying;
+  unprocessed jobs stay queued.
 
 ### Security
+- **Apply sessions ignore user settings** - `--setting-sources ""` keeps the user's own hooks and
+  global CLAUDE.md out of apply sessions.
 - **Apply agent is locked down** - runs with `--permission-mode dontAsk`, `--strict-mcp-config`,
   only Playwright browser tools allowed, all built-in tools (shell, file read/write, web fetch)
   denied. Previously `bypassPermissions` while browsing untrusted pages.
@@ -37,6 +49,8 @@ Safety and honesty pass for auto-apply, plus correctness fixes.
 - `apply_timeout` default raised to 600s, now actually enforced.
 
 ### Fixed
+- **LLM errors were saved as a score of 0** - a failed scoring call now leaves the job unscored so
+  it is retried on the next run, instead of permanently ranking it at the bottom.
 - **Dry runs were recorded as applied** (#104) - new `RESULT:DRY_RUN` / `apply_status='dry_run'`;
   dry runs also may not create accounts or confirm emails.
 - **Windows apply always failed** (#93) - the `claude` CLI is resolved with `shutil.which`

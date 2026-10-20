@@ -83,6 +83,44 @@ def get_claude_path() -> str | None:
     return shutil.which("claude")
 
 
+def claude_subprocess_env() -> dict[str, str]:
+    """Environment for spawning ``claude``, even from inside a Claude Code session."""
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    return env
+
+
+LLM_PROVIDERS = ("claude", "gemini", "openai", "local")
+
+
+def llm_provider() -> str | None:
+    """Pick the LLM provider for scoring, tailoring and cover letters.
+
+    LLM_PROVIDER forces a choice. Otherwise an explicitly configured API
+    provider wins (LLM_URL, then Gemini, then OpenAI), and the Claude Code CLI
+    is the fallback when it is installed. Returns None when nothing is usable.
+    """
+    forced = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if forced in LLM_PROVIDERS:
+        usable = {
+            "claude": get_claude_path() is not None,
+            "gemini": bool(os.environ.get("GEMINI_API_KEY")),
+            "openai": bool(os.environ.get("OPENAI_API_KEY")),
+            "local": bool(os.environ.get("LLM_URL")),
+        }
+        return forced if usable[forced] else None
+    if os.environ.get("LLM_URL"):
+        return "local"
+    if os.environ.get("GEMINI_API_KEY"):
+        return "gemini"
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai"
+    if get_claude_path():
+        return "claude"
+    return None
+
+
 def ensure_dirs():
     """Create all required directories."""
     for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR]:
@@ -228,13 +266,12 @@ def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
     Tier 1 (Discovery):            Python + pip
-    Tier 2 (AI Scoring & Tailoring): + LLM API key
+    Tier 2 (AI Scoring & Tailoring): + an LLM (Claude Code CLI or an API key)
     Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
-    if not has_llm:
+    if llm_provider() is None:
         return 1
 
     has_claude = get_claude_path() is not None
@@ -265,8 +302,8 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
+    if required >= 2 and llm_provider() is None:
+        missing.append("LLM — install Claude Code or run [bold]applypilot init[/bold] to set an API key")
     if required >= 3:
         if not shutil.which("claude"):
             missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")

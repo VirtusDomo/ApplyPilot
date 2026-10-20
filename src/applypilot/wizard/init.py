@@ -260,16 +260,29 @@ def _setup_ai_features() -> None:
         console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
         return
 
-    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, local (Ollama/llama.cpp)")
+    from applypilot.config import get_claude_path
+
+    has_claude = get_claude_path() is not None
+    console.print(
+        "Supported providers: [bold]Claude[/bold] (uses your Claude Pro/Max plan via Claude Code, "
+        "no API key), Gemini, OpenAI, local (Ollama/llama.cpp)"
+    )
     provider = Prompt.ask(
         "Provider",
-        choices=["gemini", "openai", "local"],
-        default="gemini",
+        choices=["claude", "gemini", "openai", "local"],
+        default="claude" if has_claude else "gemini",
     )
 
     env_lines = ["# ApplyPilot configuration", ""]
 
-    if provider == "gemini":
+    if provider == "claude":
+        if not has_claude:
+            console.print("[yellow]Claude Code not found on PATH. Install it from https://claude.ai/code "
+                          "and sign in with `claude` before running the pipeline.[/yellow]")
+        env_lines.append("LLM_PROVIDER=claude")
+        env_lines.append("# Per-task models (defaults: haiku for score/extract, sonnet for tailor/judge/cover)")
+        env_lines.append("# CLAUDE_MODEL_TAILOR=sonnet")
+    elif provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
         model = Prompt.ask("Model", default="gemini-2.0-flash")
         env_lines.append(f"GEMINI_API_KEY={api_key}")

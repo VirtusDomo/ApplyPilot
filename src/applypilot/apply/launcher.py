@@ -8,7 +8,6 @@ result, and updates the database. Supports parallel workers via --workers.
 import atexit
 import json
 import logging
-import os
 import platform
 import re
 import signal
@@ -107,6 +106,10 @@ def _build_claude_cmd(claude_path: str, model: str, mcp_config_path: Path) -> li
         claude_path,
         "--model", model,
         "-p",
+        # Skip the user's own settings: their hooks and global CLAUDE.md
+        # must not run inside, or leak into, an apply session. (--safe-mode
+        # would also do that, but it disables --mcp-config servers too.)
+        "--setting-sources", "",
         "--mcp-config", str(mcp_config_path),
         "--strict-mcp-config",
         "--permission-mode", "dontAsk",
@@ -407,9 +410,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         return "failed:claude_cli_not_found", 0
     cmd = _build_claude_cmd(claude_path, model, mcp_config_path)
 
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    env = config.claude_subprocess_env()
 
     worker_dir = reset_worker_dir(worker_id)
 

@@ -45,12 +45,12 @@ applypilot apply --dry-run  # fill forms without submitting
 ## Two Paths
 
 ### Full Pipeline (recommended)
-**Requires:** Python 3.11+, Node.js (for npx), Gemini API key (free), Claude Code CLI, Chrome
+**Requires:** Python 3.11+, Node.js (for npx), Claude Code CLI (Pro/Max plan), Chrome
 
 Runs all 6 stages, from job discovery to autonomous application submission. This is the full power of ApplyPilot.
 
 ### Discovery + Tailoring Only
-**Requires:** Python 3.11+, Gemini API key (free)
+**Requires:** Python 3.11+, and either Claude Code CLI or an LLM API key
 
 Runs stages 1-5: discovers jobs, scores them, tailors your resume, generates cover letters. You submit applications manually with the AI-prepared materials.
 
@@ -90,11 +90,13 @@ Each stage is independent. Run them all or pick what you need.
 |-----------|-------------|---------|
 | Python 3.11+ | Everything | Core runtime |
 | Node.js 18+ | Auto-apply | Needed for `npx` to run Playwright MCP server |
-| Gemini API key | Scoring, tailoring, cover letters | Free tier (15 RPM / 1M tokens/day) is enough |
+| LLM | Scoring, tailoring, cover letters | Claude Code CLI (uses your plan, no key), or a Gemini/OpenAI key, or a local model |
 | Chrome/Chromium | Auto-apply | Auto-detected on most systems |
 | Claude Code CLI | Auto-apply | Install from [claude.ai/code](https://claude.ai/code) |
 
-**Gemini API key is free.** Get one at [aistudio.google.com](https://aistudio.google.com). OpenAI and local models (Ollama/llama.cpp) are also supported.
+**Claude is the default LLM when Claude Code is installed.** Scoring, tailoring and cover letters run through `claude -p` on your Claude subscription: Haiku for scoring and extraction, Sonnet for tailoring, cover letters and the fabrication judge. Each call runs with no tools, no MCP servers and none of your hooks or CLAUDE.md (`--safe-mode --tools ""`). Override a task's model with `CLAUDE_MODEL_<TASK>` (e.g. `CLAUDE_MODEL_TAILOR=opus`). If you hit your plan's usage limit, the stage stops and unprocessed jobs wait for the next run.
+
+Gemini ([aistudio.google.com](https://aistudio.google.com)), OpenAI and local models (Ollama/llama.cpp) are still supported: set their key, or force one with `LLM_PROVIDER=claude|gemini|openai|local`.
 
 ### Optional
 
@@ -124,7 +126,7 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `APPLYPILOT_ENABLE_GMAIL` (optional).
+Runtime config: `LLM_PROVIDER`, `CLAUDE_MODEL`, `CLAUDE_MODEL_<TASK>`, `GEMINI_API_KEY`, `LLM_MODEL`, `APPLYPILOT_ENABLE_GMAIL` (all optional).
 
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)

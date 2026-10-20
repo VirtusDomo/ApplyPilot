@@ -1,19 +1,32 @@
 """
 Unified LLM client for ApplyPilot.
 
-Auto-detects provider from environment:
+Auto-detects provider from environment (see ``config.llm_provider``):
+  LLM_PROVIDER    -> force one of: claude, gemini, openai, local
+  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
   GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
   OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
-  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
+  (none of these) -> Claude Code CLI (``claude -p``) on your Claude
+                     subscription, if ``claude`` is on PATH
 
-LLM_MODEL env var overrides the model name for any provider.
+LLM_MODEL env var overrides the model name for the API providers. With
+Claude, each task gets its own model (Haiku for scoring and extraction,
+Sonnet for writing and fabrication checks); override all of them with
+CLAUDE_MODEL or one task with CLAUDE_MODEL_<TASK>, e.g. CLAUDE_MODEL_TAILOR=opus.
 """
 
+import json
 import logging
 import os
+import subprocess
+import tempfile
+import threading
 import time
+from pathlib import Path
 
 import httpx
+
+from applypilot import config
 
 log = logging.getLogger(__name__)
 
@@ -22,40 +35,38 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _detect_provider() -> tuple[str, str, str]:
-    """Return (base_url, model, api_key) based on environment variables.
+    """Return (base_url, model, api_key) for an HTTP provider.
 
     Reads env at call time (not module import time) so that load_env() called
     in _bootstrap() is always visible here.
     """
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    local_url = os.environ.get("LLM_URL", "")
+    provider = config.llm_provider()
     model_override = os.environ.get("LLM_MODEL", "")
 
-    if gemini_key and not local_url:
+    if provider == "gemini":
         return (
             "https://generativelanguage.googleapis.com/v1beta/openai",
             model_override or "gemini-2.0-flash",
-            gemini_key,
+            os.environ.get("GEMINI_API_KEY", ""),
         )
 
-    if openai_key and not local_url:
+    if provider == "openai":
         return (
             "https://api.openai.com/v1",
             model_override or "gpt-4o-mini",
-            openai_key,
+            os.environ.get("OPENAI_API_KEY", ""),
         )
 
-    if local_url:
+    if provider == "local":
         return (
-            local_url.rstrip("/"),
+            os.environ.get("LLM_URL", "").rstrip("/"),
             model_override or "local-model",
             os.environ.get("LLM_API_KEY", ""),
         )
 
     raise RuntimeError(
-        "No LLM provider configured. "
-        "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in your environment."
+        "No LLM provider configured. Install Claude Code (claude.ai/code) "
+        "or set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in your environment."
     )
 
 
@@ -273,6 +284,171 @@ class LLMClient:
         self._client.close()
 
 
+# ---------------------------------------------------------------------------
+# Claude Code CLI
+# ---------------------------------------------------------------------------
+
+# Default model per task. Scoring and extraction run on every job, so they use
+# the cheapest model; writing and the fabrication judge are worth Sonnet.
+CLAUDE_TASK_MODELS: dict[str, str] = {
+    "default": "haiku",
+    "extract": "haiku",
+    "score": "haiku",
+    "tailor": "sonnet",
+    "judge": "sonnet",
+    "cover": "sonnet",
+}
+
+_CLAUDE_TIMEOUT = 300  # seconds per call
+_CLAUDE_MAX_PARALLEL = 2  # be gentle with subscription rate limits
+_claude_slots = threading.BoundedSemaphore(_CLAUDE_MAX_PARALLEL)
+
+
+# Phrases the CLI uses when the subscription's usage window is exhausted.
+_USAGE_LIMIT_MARKERS = ("usage limit", "limit reached", "hit your limit", "limit will reset",
+                        "resets at", "out of extra usage")
+
+
+class ClaudeUsageLimitError(RuntimeError):
+    """The Claude subscription's usage limit was hit. Retrying won't help."""
+
+
+def claude_model_for(task: str) -> str:
+    """Resolve the model alias for a task.
+
+    CLAUDE_MODEL_<TASK> beats CLAUDE_MODEL, which beats the defaults. LLM_MODEL
+    is ignored here: it usually names a Gemini/OpenAI model from an older .env.
+    """
+    return (
+        os.environ.get(f"CLAUDE_MODEL_{task.upper()}")
+        or os.environ.get("CLAUDE_MODEL")
+        or CLAUDE_TASK_MODELS.get(task, CLAUDE_TASK_MODELS["default"])
+    )
+
+
+def build_claude_cmd(claude_path: str, model: str, system_prompt_file: str | None) -> list[str]:
+    """Plain text-in/text-out Claude call: no tools, MCP, hooks, CLAUDE.md or skills.
+
+    ``--safe-mode`` drops every user customization (your hooks would otherwise
+    fire, and your global CLAUDE.md would leak into scoring prompts) while
+    keeping subscription auth. ``--tools ""`` removes all built-in tools, so a
+    job description can't make the model touch your machine.
+    """
+    cmd = [
+        claude_path, "-p",
+        "--model", model,
+        "--safe-mode",
+        "--tools", "",
+        "--strict-mcp-config",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--output-format", "json",
+    ]
+    if system_prompt_file:
+        cmd += ["--system-prompt-file", system_prompt_file]
+    return cmd
+
+
+def _render_messages(messages: list[dict]) -> tuple[str, str]:
+    """Split OpenAI-style messages into (system_prompt, prompt_text)."""
+    system = "\n\n".join(m.get("content") or "" for m in messages if m["role"] == "system")
+    turns = [m for m in messages if m["role"] != "system"]
+    if len(turns) == 1:
+        return system, turns[0].get("content") or ""
+    # Multi-turn history has no CLI equivalent, so replay it as a transcript.
+    return system, "\n\n".join(f"[{m['role'].upper()}]\n{m.get('content') or ''}" for m in turns)
+
+
+def parse_claude_output(stdout: str) -> str:
+    """Return the reply text from ``--output-format json`` output, or raise."""
+    try:
+        data = json.loads(stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError) as exc:
+        raise RuntimeError(f"Unreadable Claude CLI output: {stdout[:300]!r}") from exc
+
+    if not data.get("is_error") and data.get("subtype") == "success":
+        return data.get("result", "")
+
+    detail = str(data.get("result") or data.get("subtype") or "unknown error")
+    if any(marker in detail.lower() for marker in _USAGE_LIMIT_MARKERS):
+        raise ClaudeUsageLimitError(f"Claude usage limit reached: {detail[:300]}")
+    raise RuntimeError(f"Claude CLI error ({data.get('api_error_status')}): {detail[:300]}")
+
+
+class ClaudeCLIClient:
+    """LLM client that runs prompts through the local Claude Code CLI.
+
+    Uses the user's Claude subscription (Pro/Max) instead of an API key.
+    ``temperature`` and ``max_tokens`` are accepted for interface parity but
+    the CLI does not expose them.
+    """
+
+    def __init__(self, claude_path: str, model: str) -> None:
+        self.claude_path = claude_path
+        self.model = model
+
+    def _run_once(self, system: str, prompt: str) -> str:
+        sp_file = None
+        if system:
+            fd, sp_file = tempfile.mkstemp(prefix="applypilot-sys-", suffix=".md")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(system)
+        try:
+            with _claude_slots:
+                proc = subprocess.run(
+                    build_claude_cmd(self.claude_path, self.model, sp_file),
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=config.claude_subprocess_env(),
+                    cwd=tempfile.gettempdir(),  # keep project settings out
+                    timeout=_CLAUDE_TIMEOUT,
+                    check=False,  # errors arrive as JSON on stdout
+                )
+        finally:
+            if sp_file:
+                Path(sp_file).unlink(missing_ok=True)
+
+        if not proc.stdout.strip():
+            raise RuntimeError(
+                f"Claude CLI exited {proc.returncode} with no output: {proc.stderr[:300]}"
+            )
+        return parse_claude_output(proc.stdout)
+
+    def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Send a chat request and return the assistant message text."""
+        system, prompt = _render_messages(messages)
+        timeouts = 0
+        for attempt in range(_MAX_RETRIES):
+            try:
+                return self._run_once(system, prompt)
+            except ClaudeUsageLimitError:
+                raise
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                timeouts += isinstance(exc, subprocess.TimeoutExpired)
+                if attempt == _MAX_RETRIES - 1 or timeouts > 1:
+                    raise
+                wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
+                log.warning("Claude call failed (%s); retrying in %ds (%d/%d)",
+                            exc, wait, attempt + 1, _MAX_RETRIES)
+                time.sleep(wait)
+        raise RuntimeError("Claude request failed after all retries")
+
+    def ask(self, prompt: str, **kwargs) -> str:
+        """Convenience: single user prompt -> assistant response."""
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+
+    def close(self) -> None:
+        pass
+
+
 class _GeminiCompatForbidden(Exception):
     """Sentinel: Gemini OpenAI-compat returned 403. Switch to native API."""
     def __init__(self, response: httpx.Response) -> None:
@@ -285,13 +461,27 @@ class _GeminiCompatForbidden(Exception):
 # ---------------------------------------------------------------------------
 
 _instance: LLMClient | None = None
+_claude_clients: dict[str, ClaudeCLIClient] = {}
+_lock = threading.Lock()
 
 
-def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
+def get_client(task: str = "default") -> LLMClient | ClaudeCLIClient:
+    """Return the client for a task.
+
+    ``task`` is a key of ``CLAUDE_TASK_MODELS`` and only matters for the Claude
+    provider, which picks a model per task. HTTP providers share one singleton.
+    """
     global _instance
-    if _instance is None:
-        base_url, model, api_key = _detect_provider()
-        log.info("LLM provider: %s  model: %s", base_url, model)
-        _instance = LLMClient(base_url, model, api_key)
-    return _instance
+    with _lock:
+        if config.llm_provider() == "claude":
+            model = claude_model_for(task)
+            if model not in _claude_clients:
+                log.info("LLM provider: Claude Code CLI  model: %s", model)
+                _claude_clients[model] = ClaudeCLIClient(config.get_claude_path() or "claude", model)
+            return _claude_clients[model]
+
+        if _instance is None:
+            base_url, model, api_key = _detect_provider()
+            log.info("LLM provider: %s  model: %s", base_url, model)
+            _instance = LLMClient(base_url, model, api_key)
+        return _instance

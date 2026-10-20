@@ -57,6 +57,7 @@ def test_claude_cmd_is_locked_down(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "bypassPermissions" not in cmd
     assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     assert "--strict-mcp-config" in cmd
+    assert cmd[cmd.index("--setting-sources") + 1] == ""  # no user hooks or CLAUDE.md
     assert cmd[cmd.index("--allowedTools") + 1] == "mcp__playwright"
     denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
     for tool in ("Bash", "PowerShell", "Read", "Write", "WebFetch"):

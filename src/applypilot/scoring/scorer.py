@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from applypilot.config import RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 
 log = logging.getLogger(__name__)
 
@@ -93,12 +93,15 @@ def score_job(resume_text: str, job: dict) -> dict:
     ]
 
     try:
-        client = get_client()
+        client = get_client("score")
         response = client.chat(messages, max_tokens=512, temperature=0.2)
         return _parse_score_response(response)
+    except ClaudeUsageLimitError:
+        raise
     except Exception as e:
         log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
-        return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
+        # Flagged so the job stays unscored and is retried next run.
+        return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}", "error": True}
 
 
 def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
@@ -138,7 +141,11 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     results: list[dict] = []
 
     for job in jobs:
-        result = score_job(resume_text, job)
+        try:
+            result = score_job(resume_text, job)
+        except ClaudeUsageLimitError as e:
+            log.error("Stopping: %s. Unscored jobs stay queued for the next run.", e)
+            break
         result["url"] = job["url"]
         completed += 1
 
@@ -154,6 +161,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
 
     # Write scores to DB
     now = datetime.now(timezone.utc).isoformat()
+    results = [r for r in results if not r.get("error")]
     for r in results:
         conn.execute(
             "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",

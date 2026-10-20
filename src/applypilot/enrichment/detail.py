@@ -25,7 +25,7 @@ from playwright.sync_api import sync_playwright
 from applypilot import config
 from applypilot.config import DB_PATH
 from applypilot.database import get_connection, init_db, ensure_columns
-from applypilot.llm import get_client
+from applypilot.llm import ClaudeUsageLimitError, get_client
 
 log = logging.getLogger(__name__)
 
@@ -463,7 +463,7 @@ def extract_with_llm(page, url: str) -> dict:
     )
 
     try:
-        client = get_client()
+        client = get_client("extract")
         t0 = time.time()
         raw = client.ask(prompt, temperature=0.0, max_tokens=4096)
         elapsed = time.time() - t0
@@ -478,6 +478,8 @@ def extract_with_llm(page, url: str) -> dict:
             desc = clean_description(desc)
 
         return {"full_description": desc, "application_url": apply_url}
+    except ClaudeUsageLimitError:
+        raise
     except Exception as e:
         log.error("LLM ERROR: %s", e)
         return {"full_description": None, "application_url": None}
@@ -589,7 +591,12 @@ def scrape_detail_page(page, url: str) -> dict:
     tier2_apply = apply
 
     # Tier 3: LLM
-    llm_result = extract_with_llm(page, url)
+    try:
+        llm_result = extract_with_llm(page, url)
+    except ClaudeUsageLimitError as e:
+        # Leave the job unscraped so the next run retries it.
+        result.update(status="deferred", error=str(e), elapsed=time.time() - t0)
+        return result
     result["full_description"] = llm_result.get("full_description")
     result["application_url"] = llm_result.get("application_url") or tier2_apply
     result["tier_used"] = 3
@@ -617,7 +624,8 @@ def scrape_site_batch(
 
     If conn is None, creates its own DB connection.
     """
-    stats: dict = {"processed": 0, "ok": 0, "partial": 0, "error": 0, "tiers": {1: 0, 2: 0, 3: 0}}
+    stats: dict = {"processed": 0, "ok": 0, "partial": 0, "error": 0, "deferred": 0,
+                   "deferred_urls": [], "tiers": {1: 0, 2: 0, 3: 0}}
 
     if max_jobs:
         jobs = jobs[:max_jobs]
@@ -661,7 +669,10 @@ def scrape_site_batch(
                 log.info("  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
                          status, tier_str, f"{desc_len:,}", apply_str, elapsed, err_str)
 
-                if status in ("ok", "partial"):
+                if status == "deferred":
+                    stats["deferred"] += 1
+                    stats["deferred_urls"].append(url)
+                elif status in ("ok", "partial"):
                     stats[status] += 1
                     conn.execute(
                         "UPDATE jobs SET full_description = ?, application_url = ?, "
@@ -811,6 +822,7 @@ def stream_detail(
     total_ok = 0
     total_err = 0
     t0 = time.time()
+    deferred: set[str] = set()  # jobs waiting on the LLM usage limit
 
     try:
         while True:
@@ -825,7 +837,8 @@ def stream_detail(
                 site_jobs: dict[str, list[tuple]] = {}
                 for row in rows:
                     url, title, site = row[0], row[1], row[2]
-                    site_jobs.setdefault(site, []).append((url, title))
+                    if url not in deferred:
+                        site_jobs.setdefault(site, []).append((url, title))
 
                 for site, jobs in site_jobs.items():
                     delay = SITE_DELAYS.get(site, 2.0)
@@ -833,6 +846,7 @@ def stream_detail(
 
                     try:
                         stats = scrape_site_batch(conn, site, jobs, delay=delay)
+                        deferred.update(stats["deferred_urls"])
                         total_ok += stats["ok"] + stats["partial"]
                         total_err += stats["error"]
                         log.info("%s: %d ok, %d partial, %d error",
@@ -841,9 +855,9 @@ def stream_detail(
                         log.error("%s: CRASHED: %s", site, e)
 
             upstream_finished = upstream_done is None or upstream_done.is_set()
-            if upstream_finished and not rows:
+            if upstream_finished and all(row[0] in deferred for row in rows):
                 break
-            if not rows:
+            if all(row[0] in deferred for row in rows):  # nothing workable yet
                 time.sleep(poll_interval)
     finally:
         elapsed = time.time() - t0
