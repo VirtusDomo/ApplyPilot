@@ -65,3 +65,14 @@ def test_dry_run_never_reports_applied(build) -> None:
 
 def test_email_verification_needs_human_without_gmail(build) -> None:
     assert "RESULT:NEEDS_HUMAN:email_verification" in build()
+
+
+def test_upload_copy_goes_to_agent_workdir(build, tmp_path: Path) -> None:
+    # The browser tool only uploads files inside the agent's working directory.
+    workdir = tmp_path / "worker-0"
+    workdir.mkdir()
+    text = prompt.build_prompt(job={"url": "u", "title": "Engineer", "site": "Example",
+                                    "tailored_resume_path": str(tmp_path / "resume.txt")},
+                               tailored_resume="resume text", upload_dir=workdir)
+    assert (workdir / "Sam_Lee_Resume.pdf").exists()
+    assert str(workdir / "Sam_Lee_Resume.pdf") in text

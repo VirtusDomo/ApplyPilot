@@ -428,11 +428,15 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     if txt_path and txt_path.exists():
         resume_text = txt_path.read_text(encoding="utf-8")
 
+    # The agent runs in a fresh worker dir; uploads must live inside it.
+    worker_dir = reset_worker_dir(worker_id)
+
     # Build the prompt
     agent_prompt = prompt_mod.build_prompt(
         job=job,
         tailored_resume=resume_text,
         dry_run=dry_run,
+        upload_dir=worker_dir,
     )
 
     # Write per-worker MCP config
@@ -445,8 +449,6 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     cmd = _build_claude_cmd(claude_path, model, mcp_config_path)
 
     env = config.claude_subprocess_env()
-
-    worker_dir = reset_worker_dir(worker_id)
 
     update_state(worker_id, status="applying", job_title=job["title"],
                  company=job.get("site", ""), score=job.get("fit_score", 0),
