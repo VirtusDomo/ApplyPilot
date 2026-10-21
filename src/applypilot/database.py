@@ -152,6 +152,7 @@ _ALL_COLUMNS: dict[str, str] = {
     "description": "TEXT",
     "location": "TEXT",
     "site": "TEXT",
+    "company": "TEXT",  # employer name, when the source gives one
     "strategy": "TEXT",
     "discovered_at": "TEXT",
     # Enrichment
@@ -362,6 +363,11 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
 
     conn.commit()
     return new, existing
+
+
+def job_company(job: dict) -> str:
+    """Employer name for prompts; falls back to the source site when unknown."""
+    return job.get("company") or job.get("site") or "Unknown"
 
 
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,

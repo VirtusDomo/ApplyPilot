@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from applypilot.config import RESUME_PATH, load_profile, load_search_config
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection, get_jobs_by_stage, job_company
 from applypilot.llm import ClaudeUsageLimitError, get_client
 
 log = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ def score_job(resume_text: str, job: dict, prefs: dict | None = None) -> dict:
     """
     job_text = (
         f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
+        f"COMPANY: {job_company(job)}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n"
         + (f"SALARY (from the job board): {job['salary']}\n" if job.get("salary") else "")
         + f"\nDESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"

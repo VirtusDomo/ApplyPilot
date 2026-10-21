@@ -212,7 +212,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
             row = conn.execute("""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path, company
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
@@ -237,7 +237,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             params.extend(priority_params)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path, company
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status IN ({retry_statuses}))

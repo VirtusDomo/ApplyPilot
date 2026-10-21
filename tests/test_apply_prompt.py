@@ -76,3 +76,17 @@ def test_upload_copy_goes_to_agent_workdir(build, tmp_path: Path) -> None:
                                tailored_resume="resume text", upload_dir=workdir)
     assert (workdir / "Sam_Lee_Resume.pdf").exists()
     assert str(workdir / "Sam_Lee_Resume.pdf") in text
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("Two weeks' notice", "Two weeks' notice (if a date is required: 11/04/2026)"),
+    ("3 weeks", "3 weeks (if a date is required: 11/11/2026)"),
+    ("Immediately", "Immediately"),
+])
+def test_notice_period_gets_a_concrete_date(value: str, expected: str) -> None:
+    from datetime import date
+    assert prompt._start_date(value, today=date(2026, 10, 21)) == expected
+
+
+def test_missing_onsite_answer_is_not_guessed(build) -> None:
+    assert "Willing to Work Onsite/Hybrid: NOT PROVIDED" in build()

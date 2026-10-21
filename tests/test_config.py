@@ -16,3 +16,9 @@ def test_legacy_top_level_keys_still_work() -> None:
 
 def test_missing_config_gives_empty_lists() -> None:
     assert load_location_filter({}) == ([], [])
+
+
+def test_job_company_prefers_employer_over_board() -> None:
+    from applypilot.database import job_company
+    assert job_company({"site": "linkedin", "company": "Gen Digital"}) == "Gen Digital"
+    assert job_company({"site": "Acme Careers", "company": None}) == "Acme Careers"

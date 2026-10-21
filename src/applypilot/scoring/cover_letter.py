@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection, get_jobs_by_stage, job_company
 from applypilot.llm import ClaudeUsageLimitError, get_client
 from applypilot.scoring.tailor import parse_verdict
 from applypilot.scoring.validator import (
@@ -140,7 +140,7 @@ def generate_cover_letter(
     """
     job_text = (
         f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
+        f"COMPANY: {job_company(job)}\n"
         f"LOCATION: {job.get('location', 'N/A')}\n\n"
         f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )

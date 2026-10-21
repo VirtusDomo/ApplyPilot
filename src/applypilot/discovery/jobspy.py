@@ -163,15 +163,18 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
 
         try:
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
-                "full_description, application_url, detail_scraped_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, title, salary, description, location_str, site_label, strategy, now,
-                 full_description, apply_url, detail_scraped_at),
+                "INSERT INTO jobs (url, title, salary, description, location, site, company, strategy, "
+                "discovered_at, full_description, application_url, detail_scraped_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (url, title, salary, description, location_str, site_label, company, strategy,
+                 now, full_description, apply_url, detail_scraped_at),
             )
             new += 1
         except sqlite3.IntegrityError:
             existing += 1
+            # Jobs stored before the company column existed get it on rediscovery.
+            conn.execute("UPDATE jobs SET company = ? WHERE url = ? AND company IS NULL",
+                         (company, url))
 
     conn.commit()
     return new, existing

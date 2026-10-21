@@ -6,11 +6,13 @@ personal data is loaded from the user's profile -- nothing is hardcoded.
 """
 
 import logging
+import re
 import shutil
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from applypilot import config
+from applypilot.database import job_company
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,22 @@ SCREENING_FIELDS: dict[str, str] = {
     "criminal_convictions": "Criminal Convictions",
     "previously_worked_here": "Previously Worked Here",
     "willing_to_relocate": "Willing to Relocate",
+    "onsite_hybrid_ok": "Willing to Work Onsite/Hybrid",
     "how_heard": "How Heard About Job",
 }
+
+
+_WEEK_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4}
+
+
+def _start_date(value: str, today: date | None = None) -> str:
+    """Add the concrete date to a notice period ("two weeks' notice") for date fields."""
+    m = re.search(r"\b(\d+|one|two|three|four)\s+weeks?\b", value, re.IGNORECASE)
+    if not m:
+        return value
+    weeks = _WEEK_WORDS.get(m.group(1).lower()) or int(m.group(1))
+    start = (today or date.today()) + timedelta(weeks=weeks)
+    return f"{value} (if a date is required: {start:%m/%d/%Y})"
 
 
 def _build_profile_summary(profile: dict) -> str:
@@ -82,7 +98,7 @@ def _build_profile_summary(profile: dict) -> str:
         lines.append(f"Education: {exp['education_level']}")
 
     # Availability
-    lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
+    lines.append(f"Available: {_start_date(avail.get('earliest_start_date', 'Immediately'))}")
 
     # Screening facts -- only what the user actually stated in their profile.
     # Anything missing is shown as NOT PROVIDED so the agent escalates instead of guessing.
@@ -196,7 +212,7 @@ Skills and tools -> the candidate's real skills are: {skills_str}. Plus anything
   - Tool is in that list or the resume -> YES, with years from the resume if asked.
   - Tool is NOT in that list or the resume -> answer NO (or the lowest honest option, e.g. "No experience" / "Familiar"). Never claim experience the candidate does not have.
 
-Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
+Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences, or meet the length the form asks for (e.g. "200-400 words"). Every claim about the candidate must come from the resume. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
 
 EEO/demographics -> use the EEO values in the APPLICANT PROFILE exactly."""
 
@@ -361,7 +377,7 @@ then output RESULT:DRY_RUN followed by a short list of anything you could not fi
 == JOB ==
 URL: {job.get('application_url') or job['url']}
 Title: {job['title']}
-Company: {job.get('site', 'Unknown')}
+Company: {job_company(job)}
 Fit Score: {job.get('fit_score', 'N/A')}/10
 
 == FILES ==
