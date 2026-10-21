@@ -85,7 +85,7 @@ Use ONLY skills from this list or the original resume. Never add a tool, languag
 
 ## TAILORING RULES:
 
-TITLE: Match the target role. Keep seniority (Senior/Lead/Staff). Drop company suffixes and team names.
+TITLE: Match the target role's function and stack, at the candidate's own level: never add Senior/Staff/Lead/Principal unless the original resume holds that title. Drop company suffixes and team names.
 
 SUMMARY: Rewrite from scratch. Lead with the 1-2 skills that matter most for THIS role. Sound like someone who's done this job.
 
@@ -326,6 +326,11 @@ def judge_tailored_resume(
     client = get_client("judge")
     response = client.chat(messages, max_tokens=512, temperature=0.1)
 
+    return parse_verdict(response)
+
+
+def parse_verdict(response: str) -> dict:
+    """Parse a judge reply in the VERDICT/ISSUES format."""
     passed = "VERDICT: PASS" in response.upper()
     issues = "none"
     if "ISSUES:" in response.upper():
@@ -338,6 +343,22 @@ def judge_tailored_resume(
         "issues": issues,
         "raw": response,
     }
+
+
+_SENIORITY_WORDS = ("senior", "sr", "staff", "lead", "principal", "distinguished")
+
+
+def honest_title(title: str, original_text: str) -> str:
+    """Drop seniority words from a tailored title that the original resume never claims.
+
+    The tailor copies the job's title, so "Senior Backend Engineer" would otherwise
+    appear on a mid-level candidate's resume.
+    """
+    for word in _SENIORITY_WORDS:
+        if not re.search(rf"\b{word}\b", original_text, re.IGNORECASE):
+            title = re.sub(rf"\b{word}\b\.?\s*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^[\s,/-]+|\(\s*\)", "", title)
+    return re.sub(r"\s{2,}", " ", title).strip() or "Software Engineer"
 
 
 # ── Core Tailoring ───────────────────────────────────────────────────────
@@ -406,6 +427,7 @@ def tailor_resume(
         except ValueError:
             avoid_notes.append("Output was not valid JSON. Return ONLY a JSON object, nothing else.")
             continue
+        data["title"] = honest_title(data.get("title") or "", resume_text)
 
         # Layer 1: Validate JSON fields
         validation = validate_json_fields(data, profile, mode=validation_mode,

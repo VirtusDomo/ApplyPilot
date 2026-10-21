@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import ClaudeUsageLimitError, get_client
+from applypilot.scoring.tailor import parse_verdict
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     LLM_LEAK_PHRASES,
@@ -93,6 +94,7 @@ VOICE:
 FABRICATION = INSTANT REJECTION:
 The candidate's real tools are ONLY: {skills_str}.
 Do NOT mention ANY tool not in this list. If the job asks for tools not listed, talk about the work you did, not the tools.
+Every claim about the candidate must be stated in the RESUME. Do not add details it lacks: which tool a project used, how the candidate works day to day, or outcomes it does not mention.
 
 Sign off: just "{sign_off_name}"
 
@@ -145,6 +147,7 @@ def generate_cover_letter(
 
     avoid_notes: list[str] = []
     letter = ""
+    judge_issues = ""
     client = get_client("cover")
     cl_prompt_base = _build_cover_letter_prompt(profile)
 
@@ -170,17 +173,58 @@ def generate_cover_letter(
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
         validation = validate_cover_letter(letter, mode=validation_mode)
-        if validation["passed"]:
+        if not validation["passed"]:
+            avoid_notes.extend(validation["errors"])
+            # Warnings never block — only hard errors trigger a retry
+            log.debug(
+                "Cover letter attempt %d/%d failed: %s",
+                attempt + 1, max_retries + 1, validation["errors"],
+            )
+            continue
+
+        if validation_mode == "lenient":
             return letter
+        judge = judge_cover_letter(resume_text, letter)
+        if judge["passed"]:
+            return letter
+        judge_issues = judge["issues"]
+        avoid_notes.append(f"Judge rejected: {judge_issues}")
+        log.debug("Cover letter attempt %d/%d rejected by judge: %s",
+                  attempt + 1, max_retries + 1, judge_issues)
 
-        avoid_notes.extend(validation["errors"])
-        # Warnings never block — only hard errors trigger a retry
-        log.debug(
-            "Cover letter attempt %d/%d failed: %s",
-            attempt + 1, max_retries + 1, validation["errors"],
-        )
+    if judge_issues:
+        # Never hand the apply agent a letter with claims the resume doesn't back.
+        raise ValueError(f"cover letter judge rejected every attempt: {judge_issues}")
+    return letter  # last attempt even if validation failed
 
-    return letter  # last attempt even if failed
+
+_JUDGE_PROMPT = """You check a cover letter against the candidate's resume before it is sent under their name. Catch claims about the candidate that the resume does not support.
+
+Answer with EXACTLY this format:
+VERDICT: PASS or FAIL
+ISSUES: (list each unsupported claim, or "none")
+
+FAIL for any statement about the candidate that is not in the resume:
+- a tool, language or framework the resume does not list, or tied to work the resume does not tie it to
+- a metric, number or outcome that is not in the resume
+- a description of how the candidate works or what they do day to day that the resume does not state
+- an employer, title, project or responsibility that is not in the resume
+
+Do NOT fail for: rewording real work, choosing which achievements to mention, statements about the employer drawn from the job, or the closing line."""
+
+
+def judge_cover_letter(resume_text: str, letter: str) -> dict:
+    """LLM judge: reject cover letters that claim more than the resume supports."""
+    messages = [
+        {"role": "system", "content": _JUDGE_PROMPT},
+        {"role": "user", "content": (
+            f"RESUME:\n{resume_text}\n\n---\n\n"
+            f"COVER LETTER:\n{letter}\n\n"
+            "Judge this cover letter:"
+        )},
+    ]
+    response = get_client("judge").chat(messages, max_tokens=512, temperature=0.1)
+    return parse_verdict(response)
 
 
 # ── Batch Entry Point ────────────────────────────────────────────────────
